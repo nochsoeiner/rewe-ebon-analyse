@@ -674,8 +674,8 @@ def generate_report(conn: sqlite3.Connection):
     weekday_avg_js    = json.dumps([float(r[2]) if r[2] else 0 for r in weekday_full])
 
     # Inflations-JSON (Top 25 Anstiege + Top 10 Senkungen)
-    inflation_top = inflation[:25]
-    inflation_bot = sorted(inflation, key=lambda r: r[5])[:10]
+    # Alle Artikel mit Preisänderung – als JSON für JS-Filter
+    inflation_all = inflation  # bereits nach pct desc sortiert
 
     # Bonus-JSON
     bonus_months_js   = json.dumps([r[0] for r in bonus_monthly])
@@ -738,18 +738,11 @@ def generate_report(conn: sqlite3.Connection):
         sign = '+' if v > 0 else ''
         return f'<span class="{cls}">{sign}{fmt(v)} %</span>'
 
-    inflation_top_rows = ''.join(
-        f'<tr><td>{n}</td><td>{iso_de(fd)}</td><td class="num">{feur(fp)}</td>'
-        f'<td>{iso_de(ld)}</td><td class="num">{feur(lp)}</td>'
-        f'<td class="num">{pct_cell(pct)}</td><td class="num">{c}</td></tr>'
-        for n, fd, fp, ld, lp, pct, c in inflation_top
-    )
-    inflation_bot_rows = ''.join(
-        f'<tr><td>{n}</td><td>{iso_de(fd)}</td><td class="num">{feur(fp)}</td>'
-        f'<td>{iso_de(ld)}</td><td class="num">{feur(lp)}</td>'
-        f'<td class="num">{pct_cell(pct)}</td><td class="num">{c}</td></tr>'
-        for n, fd, fp, ld, lp, pct, c in inflation_bot
-    )
+    # Inflation-JSON für JS-Tabelle
+    inflation_js = json.dumps([
+        {'n': n, 'fd': iso_de(fd), 'fp': fp, 'ld': iso_de(ld), 'lp': lp, 'pct': pct, 'cnt': c}
+        for n, fd, fp, ld, lp, pct, c in inflation_all
+    ], ensure_ascii=False)
 
     weekday_rows = ''.join(
         tr([name, trips, feur(avg_t), feur(sum_t)])
@@ -817,6 +810,7 @@ input:focus{{outline:2px solid #cc000066;border-color:#cc0000}}
 .ctrl-btn{{background:#f5f5f5;border:1px solid #ddd;border-radius:6px;padding:.4rem .8rem;
            cursor:pointer;font-size:.85rem;white-space:nowrap}}
 .ctrl-btn:hover{{background:#fff0f0;border-color:#cc0000;color:#cc0000}}
+.ctrl-btn.inf-active{{background:#cc0000;color:#fff;border-color:#cc0000}}
 #items-count{{font-size:.82rem;color:#888;margin-bottom:.5rem}}
 .pdf-link{{display:inline-flex;align-items:center;gap:.2rem;font-size:.82rem}}
 footer{{text-align:center;padding:2rem;color:#aaa;font-size:.78rem}}
@@ -949,21 +943,22 @@ footer{{text-align:center;padding:2rem;color:#aaa;font-size:.78rem}}
   </section>
 
   <section>
-    <h2>Preissteigerungen (Top 25)</h2>
-    <div class="scroll">
-    <table>
-      <thead>{tr(['Artikel','Erst-Datum','Erst-Preis','Letzt-Datum','Letzt-Preis','Änderung','Käufe'],'th')}</thead>
-      <tbody>{inflation_top_rows}</tbody>
-    </table>
+    <h2>Preisentwicklung je Artikel</h2>
+    <div style="display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:.8rem;align-items:center">
+      <button class="ctrl-btn inf-active" onclick="filterInflation('all',this)">Alle</button>
+      <button class="ctrl-btn" onclick="filterInflation('up',this)">▲ Preissteigerungen</button>
+      <button class="ctrl-btn" onclick="filterInflation('down',this)">▼ Preissenkungen</button>
+      <span id="inf-count" style="margin-left:auto;font-size:.82rem;color:#888"></span>
     </div>
-  </section>
-
-  <section>
-    <h2>Preissenkungen (Top 10)</h2>
-    <div class="scroll">
-    <table>
-      <thead>{tr(['Artikel','Erst-Datum','Erst-Preis','Letzt-Datum','Letzt-Preis','Änderung','Käufe'],'th')}</thead>
-      <tbody>{inflation_bot_rows}</tbody>
+    <div class="scroll" style="max-height:520px">
+    <table id="inf-table">
+      <thead><tr>
+        <th>Artikel</th>
+        <th class="num">Erst-Datum</th><th class="num">Erst-Preis</th>
+        <th class="num">Letzt-Datum</th><th class="num">Letzt-Preis</th>
+        <th class="num">Änderung</th><th class="num">Käufe</th>
+      </tr></thead>
+      <tbody id="inf-body"></tbody>
     </table>
     </div>
   </section>
@@ -1049,6 +1044,7 @@ const BONUS_MONTHS    = {bonus_months_js};
 const BONUS_EARNED    = {bonus_earned_js};
 const BONUS_BALANCE   = {bonus_balance_js};
 const BONUS_PCT       = {bonus_pct_js};
+const INFLATION       = {inflation_js};
 
 // ── Navigation ─────────────────────────────────────────────────────────────
 function showTab(id) {{
@@ -1295,9 +1291,17 @@ function initStats() {{
       responsive: true, maintainAspectRatio: false,
       plugins: {{ legend: {{ position: 'bottom' }} }},
       scales: {{
-        y:  {{ position: 'left',  ticks: {{ callback: v => '€ ' + v.toFixed(2).replace('.',',') }} }},
-        y2: {{ position: 'right', ticks: {{ callback: v => '€ ' + v.toFixed(2).replace('.',',') }},
-               grid: {{ drawOnChartArea: false }} }},
+        y: {{
+          position: 'left',
+          title: {{ display: true, text: '← Gesammelt (€)', color: '#2a9d8f', font: {{ weight: '600' }} }},
+          ticks: {{ color: '#2a9d8f', callback: v => '€ ' + v.toFixed(2).replace('.',',') }},
+        }},
+        y2: {{
+          position: 'right',
+          title: {{ display: true, text: 'Guthaben (€) →', color: '#c9a227', font: {{ weight: '600' }} }},
+          ticks: {{ color: '#c9a227', callback: v => '€ ' + v.toFixed(2).replace('.',',') }},
+          grid: {{ drawOnChartArea: false }},
+        }},
       }}
     }}
   }});
@@ -1338,6 +1342,35 @@ function initStats() {{
       }}
     }}
   }});
+
+  // Inflation-Tabelle initial befüllen
+  renderInflation(INFLATION);
+}}
+
+let _infMode = 'all';
+function filterInflation(mode, btn) {{
+  _infMode = mode;
+  document.querySelectorAll('.inf-active').forEach(b => b.classList.remove('inf-active'));
+  btn.classList.add('inf-active');
+  let data = INFLATION;
+  if (mode === 'up')   data = INFLATION.filter(r => r.pct > 0);
+  if (mode === 'down') data = INFLATION.filter(r => r.pct < 0).slice().reverse();
+  renderInflation(data);
+}}
+
+function renderInflation(data) {{
+  document.getElementById('inf-count').textContent = data.length + ' Artikel';
+  document.getElementById('inf-body').innerHTML = data.map(r => {{
+    const cls = r.pct > 0 ? 'pct-pos' : 'pct-neg';
+    const sign = r.pct > 0 ? '+' : '';
+    return `<tr>
+      <td>${{r.n}}</td>
+      <td class="num">${{r.fd}}</td><td class="num">${{eur(r.fp)}}</td>
+      <td class="num">${{r.ld}}</td><td class="num">${{eur(r.lp)}}</td>
+      <td class="num"><span class="${{cls}}">${{sign}}${{r.pct.toFixed(1).replace('.',',')}} %</span></td>
+      <td class="num">${{r.cnt}}</td>
+    </tr>`;
+  }}).join('');
 }}
 
 // ── Alle Positionen ─────────────────────────────────────────────────────────
@@ -1460,11 +1493,14 @@ function toggleReceipt(idx, row) {{
 
   const r = document.getElementById('rec-body')._list[idx];
   const lines = r.lines || [];
-  const itemRows = lines.map(l =>
-    `<tr><td>${{l.n}}</td><td><span class="badge">${{l.cat}}</span></td>
-     <td style="text-align:right">${{eur(l.p)}}</td>
-     <td style="color:#888">${{l.q > 1 ? l.q + '× à ' + eur(l.u) : ''}}</td></tr>`
-  ).join('');
+  const itemRows = lines.map(l => {{
+    let einheit = '';
+    if (l.q > 1)                          einheit = l.q + '× à ' + eur(l.u);
+    else if (l.u && Math.abs(l.u - l.p) > 0.005) einheit = eur(l.u) + '/kg';
+    return `<tr><td>${{l.n}}</td><td><span class="badge">${{l.cat}}</span></td>
+      <td class="num">${{eur(l.p)}}</td>
+      <td class="num" style="color:#888">${{einheit}}</td></tr>`;
+  }}).join('');
 
   const expand = document.createElement('tr');
   expand.className = 'expand-row';
@@ -1472,7 +1508,7 @@ function toggleReceipt(idx, row) {{
     <table style="width:100%">
       <thead><tr>
         <th>Artikel</th><th>Kategorie</th>
-        <th style="text-align:right">Preis</th><th>Menge</th>
+        <th class="num">Preis</th><th class="num">Menge / Kilopreis</th>
       </tr></thead>
       <tbody>${{itemRows}}</tbody>
     </table>
