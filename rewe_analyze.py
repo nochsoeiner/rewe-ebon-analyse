@@ -468,6 +468,46 @@ def backfill_bonus(conn: sqlite3.Connection):
         conn.commit()
 
 
+def remigrate_unit_prices(conn: sqlite3.Connection):
+    """Korrigiert unit_price für Gewichtsartikel aus gespeicherten PDFs.
+    Betroffen: Artikel wo unit_price == price, weil die alte Version die
+    kg-Zeile übersprungen hat."""
+    # Receipts mit mindestens einem Item wo unit_price == price
+    rows = conn.execute("""
+        SELECT DISTINCT r.id, r.source
+        FROM receipts r JOIN items i ON i.receipt_id = r.id
+        WHERE ROUND(i.unit_price, 4) = ROUND(i.price, 4)
+    """).fetchall()
+    if not rows:
+        return
+    total_updated = 0
+    for rid, source in rows:
+        pdf_path = PDF_DIR / source.replace('.eml', '.pdf')
+        if not pdf_path.exists():
+            continue
+        try:
+            with pdfplumber.open(pdf_path) as pdf:
+                text = '\n'.join(p.extract_text() or '' for p in pdf.pages)
+        except Exception:
+            continue
+        receipt = parse_receipt(text)
+        if not receipt:
+            continue
+        for item in receipt['items']:
+            # Nur updaten wenn der neu geparste unit_price sich vom Preis unterscheidet
+            if abs(item['unit_price'] - item['price']) > 0.001:
+                n = conn.execute("""
+                    UPDATE items SET unit_price = ?
+                    WHERE receipt_id = ? AND name = ?
+                      AND ROUND(price, 4) = ROUND(?, 4)
+                      AND ROUND(unit_price, 4) = ROUND(price, 4)
+                """, (item['unit_price'], rid, item['name'], item['price'])).rowcount
+                total_updated += n
+    if total_updated:
+        conn.commit()
+        print(f"  {total_updated} unit_price-Werte korrigiert (kg-Artikel)")
+
+
 # ── HTML-Report ────────────────────────────────────────────────────────────────
 
 def generate_report(conn: sqlite3.Connection):
@@ -1554,6 +1594,8 @@ def main():
     extract_all_pdfs()
     print("Bonus-Daten ergänzen…")
     backfill_bonus(conn)
+    print("kg-Preise nachmigrieren…")
+    remigrate_unit_prices(conn)
 
     if not new_files:
         print("Keine neuen Belege gefunden. Erstelle Report aus vorhandenen Daten...")
