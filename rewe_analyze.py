@@ -383,10 +383,11 @@ def process_eml(path: Path, conn: sqlite3.Connection) -> bool:
 # ── PDF-Extraktion ─────────────────────────────────────────────────────────────
 
 def extract_all_pdfs():
-    """Extrahiert alle PDFs aus EMLs in den pdfs/-Ordner."""
+    """Extrahiert PDFs aus EMLs und kopiert direkte PDFs in den pdfs/-Ordner."""
+    import shutil
     PDF_DIR.mkdir(exist_ok=True)
-    eml_files = sorted(IMPORT_DIR.glob("Dein REWE eBon*.eml"))
-    for path in eml_files:
+    # EMLs → PDFs extrahieren
+    for path in sorted(IMPORT_DIR.glob("*.eml")):
         pdf_out = PDF_DIR / (path.stem + ".pdf")
         if pdf_out.exists():
             continue
@@ -402,6 +403,36 @@ def extract_all_pdfs():
                     break
         except Exception:
             pass
+    # Direkte PDFs aus import/ → pdfs/ kopieren
+    for path in sorted(IMPORT_DIR.glob("*.pdf")):
+        pdf_out = PDF_DIR / path.name
+        if not pdf_out.exists():
+            shutil.copy2(path, pdf_out)
+
+
+def process_pdf_direct(path: Path, conn: sqlite3.Connection) -> bool:
+    """Verarbeitet eine direkt abgelegte PDF-Datei aus dem Import-Ordner."""
+    pdf_dest = PDF_DIR / path.name
+    try:
+        with pdfplumber.open(pdf_dest) as pdf:
+            text = '\n'.join(p.extract_text() or '' for p in pdf.pages)
+    except Exception as e:
+        print(f"  PDF-Fehler in {path.name}: {e}")
+        return False
+
+    receipt = parse_receipt(text)
+    if not receipt or not receipt.get('date') or not receipt.get('total'):
+        print(f"  Konnte Beleg nicht parsen: {path.name}")
+        return False
+
+    rid = insert_receipt(conn, receipt, path.name)
+    if rid:
+        insert_items(conn, rid, receipt['items'])
+    conn.execute(
+        "INSERT OR IGNORE INTO processed_files (filename) VALUES (?)", (path.name,)
+    )
+    conn.commit()
+    return True
 
 
 def backfill_bonus(conn: sqlite3.Connection):
@@ -559,15 +590,20 @@ def generate_report(conn: sqlite3.Connection):
 
     # Bonus-Statistik
     bonus_monthly = conn.execute("""
-        SELECT substr(date,1,7), ROUND(SUM(bonus_earned),2),
-               MAX(bonus_balance)
+        SELECT substr(date,1,7),
+               ROUND(SUM(bonus_earned),2)                         as earned,
+               MAX(bonus_balance)                                  as balance,
+               ROUND(SUM(total),2)                                as umsatz,
+               ROUND(SUM(bonus_earned)/SUM(total)*100, 2)         as pct
         FROM receipts WHERE bonus_earned IS NOT NULL
         GROUP BY 1 ORDER BY 1
     """).fetchall()
     bonus_total = conn.execute("""
         SELECT ROUND(SUM(bonus_earned),2),
                (SELECT bonus_balance FROM receipts
-                WHERE bonus_balance IS NOT NULL ORDER BY date DESC LIMIT 1)
+                WHERE bonus_balance IS NOT NULL ORDER BY date DESC LIMIT 1),
+               ROUND(SUM(bonus_earned)/NULLIF(SUM(CASE WHEN bonus_earned IS NOT NULL
+                     THEN total END),0)*100, 2)
         FROM receipts
     """).fetchone()
 
@@ -640,10 +676,12 @@ def generate_report(conn: sqlite3.Connection):
 
     # Bonus-JSON
     bonus_months_js   = json.dumps([r[0] for r in bonus_monthly])
-    bonus_earned_js   = json.dumps([float(r[1]) if r[1] else 0 for r in bonus_monthly])
+    bonus_earned_js   = json.dumps([float(r[1]) if r[1] else 0  for r in bonus_monthly])
     bonus_balance_js  = json.dumps([float(r[2]) if r[2] else None for r in bonus_monthly])
+    bonus_pct_js      = json.dumps([float(r[4]) if r[4] else None for r in bonus_monthly])
     bonus_total_earned = bonus_total[0] or 0
     bonus_current_bal  = bonus_total[1] or 0
+    bonus_avg_pct      = bonus_total[2] or 0
 
     # ── HTML-Tabellen ───────────────────────────────────────────────────────
 
@@ -892,8 +930,19 @@ footer{{text-align:center;padding:2rem;color:#aaa;font-size:.78rem}}
            <div class="lbl">Gesamt gesammelt</div></div>
       <div class="stat"><div class="val">{feur(bonus_current_bal)}</div>
            <div class="lbl">Aktuelles Guthaben</div></div>
+      <div class="stat"><div class="val">{fmt(bonus_avg_pct)} %</div>
+           <div class="lbl">Ø Bonus-Rate</div></div>
     </div>
-    <div class="chart-wrap"><canvas id="bonusChart"></canvas></div>
+    <div class="two-col">
+      <div>
+        <div style="font-size:.85rem;color:#777;margin-bottom:.4rem">Gesammelt &amp; Guthaben</div>
+        <div class="chart-wrap"><canvas id="bonusChart"></canvas></div>
+      </div>
+      <div>
+        <div style="font-size:.85rem;color:#777;margin-bottom:.4rem">Bonus-Rate pro Monat (% des Umsatzes)</div>
+        <div class="chart-wrap"><canvas id="bonusPctChart"></canvas></div>
+      </div>
+    </div>
   </section>
 
   <section>
@@ -996,6 +1045,7 @@ const WEEKDAY_AVG     = {weekday_avg_js};
 const BONUS_MONTHS    = {bonus_months_js};
 const BONUS_EARNED    = {bonus_earned_js};
 const BONUS_BALANCE   = {bonus_balance_js};
+const BONUS_PCT       = {bonus_pct_js};
 
 // ── Navigation ─────────────────────────────────────────────────────────────
 function showTab(id) {{
@@ -1247,6 +1297,43 @@ function initStats() {{
       }}
     }}
   }});
+
+  // Bonus-Rate pro Monat
+  const avgPct = BONUS_PCT.filter(v => v != null);
+  const overallAvg = avgPct.length ? (avgPct.reduce((a,b) => a+b,0)/avgPct.length).toFixed(2) : 0;
+  new Chart(document.getElementById('bonusPctChart'), {{
+    type: 'bar',
+    data: {{
+      labels: BONUS_MONTHS,
+      datasets: [
+        {{ label: 'Bonus-Rate (%)', data: BONUS_PCT,
+           backgroundColor: ctx => {{
+             const v = ctx.raw;
+             if (v == null) return 'transparent';
+             return v >= overallAvg ? '#2a9d8f88' : '#e9c46a88';
+           }},
+           borderColor: ctx => {{
+             const v = ctx.raw;
+             if (v == null) return 'transparent';
+             return v >= overallAvg ? '#2a9d8f' : '#e9c46a';
+           }},
+           borderWidth: 1.5, borderRadius: 4 }},
+      ]
+    }},
+    options: {{
+      responsive: true, maintainAspectRatio: false,
+      plugins: {{
+        legend: {{ display: false }},
+        tooltip: {{ callbacks: {{ label: ctx => ' ' + ctx.raw?.toFixed(2).replace('.',',') + ' %' }} }},
+        annotation: {{}}
+      }},
+      scales: {{
+        y: {{ ticks: {{ callback: v => v.toFixed(1) + ' %' }},
+              suggestedMin: 0 }},
+        x: {{ ticks: {{ maxRotation: 45 }} }}
+      }}
+    }}
+  }});
 }}
 
 // ── Alle Positionen ─────────────────────────────────────────────────────────
@@ -1413,12 +1500,17 @@ def main():
     conn = sqlite3.connect(DB_PATH)
     init_db(conn)
 
+    # Direkte PDFs aus import/ ebenfalls einsammeln
+    pdf_files = sorted(IMPORT_DIR.glob("*.pdf"))
+
     # Bereits verarbeitete Dateien überspringen
     done = {row[0] for row in conn.execute("SELECT filename FROM processed_files")}
-    new_files = [p for p in eml_files if p.name not in done]
+    new_emls = [p for p in eml_files if p.name not in done]
+    new_pdfs = [p for p in pdf_files if p.name not in done]
+    new_files = new_emls + new_pdfs
 
-    # PDFs immer aktuell halten (fehlende extrahieren)
-    print("Extrahiere PDFs…")
+    # PDFs immer aktuell halten (fehlende extrahieren + direkte kopieren)
+    print("Extrahiere/kopiere PDFs…")
     extract_all_pdfs()
     print("Bonus-Daten ergänzen…")
     backfill_bonus(conn)
@@ -1433,13 +1525,14 @@ def main():
         print(f"\nÖffne Report: open '{REPORT_PATH}'")
         return
 
-    print(f"Neu zu verarbeiten: {len(new_files)} | Bereits in DB: {len(done)}")
+    print(f"Neu zu verarbeiten: {len(new_files)} (EML: {len(new_emls)}, PDF: {len(new_pdfs)}) | Bereits in DB: {len(done)}")
 
     ok, fail = 0, 0
     for i, path in enumerate(new_files, 1):
         sys.stdout.write(f"\r  Verarbeite {i}/{len(new_files)}: {path.name[:50]:<50}")
         sys.stdout.flush()
-        if process_eml(path, conn):
+        is_pdf = path.suffix.lower() == '.pdf'
+        if (process_pdf_direct if is_pdf else process_eml)(path, conn):
             ok += 1
         else:
             fail += 1
