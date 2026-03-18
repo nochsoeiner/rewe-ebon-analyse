@@ -31,11 +31,18 @@ python3 rewe_analyze.py
 ```
 
 ### Neue Kassenbons hinzufügen
+
+**Option A – EML (aus Apple Mail):**
 1. eBon-Mail in Apple Mail öffnen
-2. *Ablage → Als Datei sichern…* → in den `import/`-Ordner speichern
+2. *Ablage → Als Datei sichern…* → `.eml`-Datei in den `import/`-Ordner legen
 3. `Auswertung starten.command` doppelklicken
 
-Das Skript erkennt automatisch neue EML-Dateien und verarbeitet nur diese.
+**Option B – Direkte PDF:**
+1. PDF-Datei direkt in den `import/`-Ordner legen
+2. `Auswertung starten.command` doppelklicken
+
+Das Skript erkennt automatisch neue EML- und PDF-Dateien, verarbeitet nur diese
+und **löscht sie danach automatisch** aus dem `import/`-Ordner.
 
 ## Ordnerstruktur
 

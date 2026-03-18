@@ -148,7 +148,7 @@ def categorize(name: str) -> str:
 
 ITEM_RE = re.compile(r'^(.+)\s+(\d+,\d{2})\s+([A-Z])\s*\*?\s*$')
 MULTI_QTY_RE = re.compile(r'^(\d+)\s+[Ss]tk\s+[xX]\s+(\d+,\d{2})$')
-WEIGHT_RE = re.compile(r'^\d+[,\.]\d+\s+kg\s+[xX]\s+[\d,]+\s+EUR/kg$')
+WEIGHT_RE    = re.compile(r'^(\d+[,\.]\d+)\s+kg\s+[xX]\s+([\d,]+)\s+EUR/kg$')
 SUMME_RE        = re.compile(r'SUMME\s+EUR\s+(\d+,\d{2})')
 DATE_RE         = re.compile(r'(\d{2})\.(\d{1,2})\.(\d{4})\s+(\d{2}):(\d{2})')
 MARKT_RE        = re.compile(r'Markt:(\d+)')
@@ -219,8 +219,11 @@ def parse_receipt(text: str):
             # pending_item bleibt offen; nächste Zeile kann weiterer Modifier sein
             continue
 
-        # Gewichtszeile "0,090 kg x 5,50 EUR/kg" – informational, überspringen
-        if WEIGHT_RE.match(stripped):
+        # Gewichtszeile "0,552 kg x 3,99 EUR/kg" – unit_price = EUR/kg
+        wt_m = WEIGHT_RE.match(stripped)
+        if wt_m:
+            if pending_item:
+                pending_item['unit_price'] = price_to_float(wt_m.group(2))
             continue
 
         # Normale Artikelzeile
@@ -1227,6 +1230,7 @@ function updateTrendChart() {{
   if (!trendChart) {{
     trendChart = new Chart(document.getElementById('trendChart'), {{
       type: 'line',
+      plugins: [yearSepPlugin],
       data: {{ labels: MONTHS, datasets }},
       options: {{
         responsive: true,
@@ -1534,6 +1538,10 @@ def main():
         is_pdf = path.suffix.lower() == '.pdf'
         if (process_pdf_direct if is_pdf else process_eml)(path, conn):
             ok += 1
+            try:
+                path.unlink()   # nach erfolgreicher Verarbeitung aus import/ löschen
+            except Exception:
+                pass
         else:
             fail += 1
 
