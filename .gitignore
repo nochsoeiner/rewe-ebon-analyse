@@ -1,0 +1,10 @@
+# Persönliche Daten – werden nicht ins Repo hochgeladen
+import/
+pdfs/
+rewe_ebons.db
+rewe_report.html
+
+# macOS
+.DS_Store
+__pycache__/
+*.pyc
