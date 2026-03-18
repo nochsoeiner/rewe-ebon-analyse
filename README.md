@@ -7,7 +7,7 @@ Erstellt einen interaktiven HTML-Bericht aus den eigenen Einkaufsdaten.
 
 - 📊 **Dashboard** – Monatsausgaben, Jahresübersicht, Top-Artikel, Kategorien
 - 📈 **Preisentwicklung** – Preishistorie einzelner Artikel über die Zeit
-- 🔍 **Statistiken** – Wochentag-Analyse, Inflations-Tracker, Bonus-Guthaben
+- 🔍 **Statistiken** – Wochentag-Analyse, Inflations-Tracker, Bonus-Guthaben, Bonus-Rate pro Monat (% des Umsatzes)
 - 🗂 **Alle Positionen** – Suchbar & sortierbar nach allen Spalten
 - 🧾 **Alle Belege** – Aufklappbar mit Detailansicht, direkter PDF-Link
 
@@ -41,7 +41,7 @@ Das Skript erkennt automatisch neue EML-Dateien und verarbeitet nur diese.
 
 ```
 Rewe/
-├── import/                  ← EML-Dateien hier ablegen
+├── import/                  ← EML, oder PDF-Dateien hier ablegen
 ├── pdfs/                    ← auto-extrahierte PDFs (wird auto-erstellt)
 ├── rewe_analyze.py          ← Hauptskript
 ├── rewe_ebons.db            ← Datenbank (wird auto-erstellt)
