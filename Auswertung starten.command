@@ -10,9 +10,7 @@ echo "Neue EML-Dateien in 'import/' ablegen,"
 echo "dann läuft die Auswertung automatisch."
 echo ""
 
-python3 rewe_analyze.py
+python3 rewe_analyze.py --serve
 
 echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "Fertig! Bericht wird geöffnet..."
-open "rewe_report.html"
+echo "Server beendet."

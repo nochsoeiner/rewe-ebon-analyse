@@ -9,10 +9,15 @@ import io
 import json
 import re
 import shutil
+import socket
 import sqlite3
+import subprocess
 import sys
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+
+GROUPS_SERVER_PORT = 7331
 
 try:
     import pdfplumber
@@ -149,6 +154,7 @@ def categorize(name: str) -> str:
 ITEM_RE = re.compile(r'^(.+)\s+(\d+,\d{2})\s+([A-Z])\s*\*?\s*$')
 MULTI_QTY_RE = re.compile(r'^(\d+)\s+[Ss]tk\s+[xX]\s+(\d+,\d{2})$')
 WEIGHT_RE    = re.compile(r'^(\d+[,\.]\d+)\s+kg\s+[xX]\s+([\d,]+)\s+EUR/kg$')
+HANDEINGABE_RE = re.compile(r'Handeingabe\s+E-Bon\s+(\d+[,\.]\d+)\s+kg')
 SUMME_RE        = re.compile(r'SUMME\s+EUR\s+(\d+,\d{2})')
 DATE_RE         = re.compile(r'(\d{2})\.(\d{1,2})\.(\d{4})\s+(\d{2}):(\d{2})')
 MARKT_RE        = re.compile(r'Markt:(\d+)')
@@ -224,6 +230,14 @@ def parse_receipt(text: str):
         if wt_m:
             if pending_item:
                 pending_item['unit_price'] = price_to_float(wt_m.group(2))
+            continue
+
+        # Handeingabe E-Bon "Handeingabe E-Bon 0,422 kg" – kein EUR/kg, berechnen
+        he_m = HANDEINGABE_RE.search(stripped)
+        if he_m and pending_item:
+            kg = price_to_float(he_m.group(1))
+            if kg > 0:
+                pending_item['unit_price'] = round(pending_item['price'] / kg, 2)
             continue
 
         # Normale Artikelzeile
@@ -513,6 +527,20 @@ def remigrate_unit_prices(conn: sqlite3.Connection):
 def generate_report(conn: sqlite3.Connection):
     from collections import defaultdict
 
+    # ── Gruppen laden (groups.json) ──────────────────────────────────────────
+    _groups_file = SCRIPT_DIR / 'groups.json'
+    _groups = {}      # canonical -> [alias, alias, ...]
+    _grp_map = {}     # alias -> canonical
+    if _groups_file.exists():
+        try:
+            _groups = json.loads(_groups_file.read_text('utf-8'))
+            for _gc, _gas in _groups.items():
+                for _ga in _gas:
+                    _grp_map[_ga] = _gc
+        except Exception:
+            pass
+    def _grp(name): return _grp_map.get(name, name)
+
     def fmt(v):
         """Float → '1.234,56'"""
         if v is None: return '–'
@@ -559,18 +587,47 @@ def generate_report(conn: sqlite3.Connection):
         price_months.add(month)
     price_months = sorted(price_months)
 
-    # Top-30 nach Häufigkeit
-    top_freq = conn.execute("""
-        SELECT name, COUNT(*) cnt, ROUND(SUM(price),2), ROUND(AVG(unit_price),2),
-               ROUND(MIN(unit_price),2), ROUND(MAX(unit_price),2)
-        FROM items GROUP BY name ORDER BY cnt DESC LIMIT 30
-    """).fetchall()
+    # Preisschwankung pro Artikel
+    _buys_map = {n: c for n, c in all_item_names}
+    _price_vol = []
+    for _pvn, _pvm in price_by_item.items():
+        _pvp = [v for v in _pvm.values() if v and v > 0]
+        if len(_pvp) < 3:
+            continue
+        _mn, _mx, _avg = min(_pvp), max(_pvp), sum(_pvp) / len(_pvp)
+        _swing = round((_mx - _mn) / _avg * 100, 1) if _avg > 0 else 0
+        _price_vol.append({'n': _pvn, 'min': round(_mn, 2), 'max': round(_mx, 2),
+                           'avg': round(_avg, 2), 'swing': _swing, 'cnt': len(_pvp),
+                           'buys': _buys_map.get(_pvn, 0)})
+    _price_vol.sort(key=lambda x: x['swing'], reverse=True)
 
-    # Top-20 nach Ausgaben
-    top_spend = conn.execute("""
-        SELECT name, ROUND(SUM(price),2) tot, COUNT(*) cnt
-        FROM items GROUP BY name ORDER BY tot DESC LIMIT 20
+    # Top-Artikel: alle Namen aggregieren, dann Gruppen anwenden
+    _all_name_stats = conn.execute("""
+        SELECT name, SUM(quantity) cnt, SUM(price), MIN(unit_price), MAX(unit_price)
+        FROM items GROUP BY name
     """).fetchall()
+    _grp_agg = {}   # canonical -> {cnt, total, min_up, max_up}
+    for _an, _ac, _at, _amin, _amax in _all_name_stats:
+        _k = _grp(_an)
+        if _k not in _grp_agg:
+            _grp_agg[_k] = {'cnt': 0, 'total': 0.0, 'min_up': None, 'max_up': None}
+        _d = _grp_agg[_k]
+        _d['cnt']   += _ac
+        _d['total'] += _at or 0.0
+        if _amin and (_d['min_up'] is None or _amin < _d['min_up']): _d['min_up'] = _amin
+        if _amax and (_d['max_up'] is None or _amax > _d['max_up']): _d['max_up'] = _amax
+
+    top_freq = sorted([
+        (_n, _d['cnt'], round(_d['total'], 2),
+         round(_d['total'] / _d['cnt'], 2) if _d['cnt'] else 0,
+         _d['min_up'], _d['max_up'])
+        for _n, _d in _grp_agg.items()
+    ], key=lambda x: x[1], reverse=True)[:30]
+
+    top_spend = sorted([
+        (_n, round(_d['total'], 2), _d['cnt'])
+        for _n, _d in _grp_agg.items()
+    ], key=lambda x: x[1], reverse=True)[:20]
 
     # Kategorien: Ausgaben + Häufigkeit
     cat_stats = conn.execute("""
@@ -650,6 +707,165 @@ def generate_report(conn: sqlite3.Connection):
         FROM receipts
     """).fetchone()
 
+    # ── Warenkorbanalyse ─────────────────────────────────────────────────────
+    from collections import Counter as _Counter
+    from itertools import combinations as _comb
+    _basket_rows = conn.execute(
+        "SELECT receipt_id, name FROM items ORDER BY receipt_id, name"
+    ).fetchall()
+    _baskets = defaultdict(list)
+    for _rid, _bname in _basket_rows:
+        _baskets[_rid].append(_grp(_bname))
+    _pair_counts = _Counter()
+    for _bl in _baskets.values():
+        for _a, _b in _comb(sorted(set(_bl)), 2):
+            _pair_counts[(_a, _b)] += 1
+    basket_pairs = [
+        {'a': a, 'b': b, 'cnt': cnt}
+        for (a, b), cnt in _pair_counts.most_common(50)
+        if cnt >= 3
+    ]
+
+    # ── Saisonale Muster ─────────────────────────────────────────────────────
+    seasonal_raw = conn.execute("""
+        SELECT
+            CASE
+                WHEN CAST(substr(r.date,6,2) AS INT) IN (12,1,2) THEN 'Winter'
+                WHEN CAST(substr(r.date,6,2) AS INT) IN (3,4,5) THEN 'Frühling'
+                WHEN CAST(substr(r.date,6,2) AS INT) IN (6,7,8) THEN 'Sommer'
+                ELSE 'Herbst'
+            END as season,
+            COALESCE(i.category,'Sonstiges') as cat,
+            ROUND(SUM(i.price),2) as total
+        FROM items i JOIN receipts r ON i.receipt_id=r.id
+        GROUP BY season, cat ORDER BY season, total DESC
+    """).fetchall()
+    _seasons_ord = ['Frühling','Sommer','Herbst','Winter']
+    _seas_cats   = sorted(set(r[1] for r in seasonal_raw))
+    _seas_map    = {s: {r[1]: float(r[2]) for r in seasonal_raw if r[0]==s} for s in _seasons_ord}
+
+    # ── Ausgaben-Forecast ────────────────────────────────────────────────────
+    import calendar as _cal
+    _curr_month    = datetime.now().strftime('%Y-%m')
+    _days_elapsed  = datetime.now().day
+    _days_in_month = _cal.monthrange(datetime.now().year, datetime.now().month)[1]
+    _ct = conn.execute(
+        "SELECT ROUND(SUM(total),2), COUNT(*) FROM receipts WHERE substr(date,1,7)=?",
+        (_curr_month,)
+    ).fetchone()
+    _curr_spending = float(_ct[0] or 0)
+    _curr_trips    = int(_ct[1] or 0)
+    _hist_avg_row  = conn.execute("""
+        SELECT ROUND(AVG(mt),2) FROM (
+            SELECT SUM(total) mt FROM receipts WHERE substr(date,1,7)<?
+            GROUP BY substr(date,1,7) ORDER BY substr(date,1,7) DESC LIMIT 6
+        )
+    """, (_curr_month,)).fetchone()[0] or 0
+    _daily_rate = _curr_spending / max(_days_elapsed, 1)
+    _forecast   = round(_daily_rate * _days_in_month, 2)
+    _vs_avg     = round((_forecast - float(_hist_avg_row)) / max(float(_hist_avg_row), 0.01) * 100, 1) if _hist_avg_row else 0
+
+    # ── Preis-Alarm ──────────────────────────────────────────────────────────
+    _ph = conn.execute("""
+        SELECT i.name, i.unit_price, r.date
+        FROM items i JOIN receipts r ON i.receipt_id=r.id
+        WHERE i.unit_price>0
+          AND i.name IN (SELECT name FROM items GROUP BY name HAVING COUNT(*)>=3)
+        ORDER BY i.name, r.date
+    """).fetchall()
+    _ph_map = defaultdict(list)
+    for _n, _p, _d in _ph:
+        _ph_map[_n].append((_d, float(_p)))
+    price_alarm = []
+    for _n, _hist in _ph_map.items():
+        _avg_p = sum(p for _, p in _hist) / len(_hist)
+        _ld, _lp = _hist[-1]
+        _dev = (_lp - _avg_p) / _avg_p * 100
+        if _dev > 10:
+            price_alarm.append({
+                'n': _n, 'avg': round(_avg_p, 2), 'last': round(_lp, 2),
+                'date': _ld, 'dev': round(_dev, 1), 'cnt': len(_hist)
+            })
+    price_alarm.sort(key=lambda x: x['dev'], reverse=True)
+    price_alarm = price_alarm[:30]
+
+    # ── Verbrauch & Wiederbestellungs-Prognose ────────────────────────────────
+    from datetime import timedelta as _td
+
+    _date_span = conn.execute(
+        "SELECT CAST(julianday(MAX(date))-julianday(MIN(date)) AS INT) FROM receipts"
+    ).fetchone()[0] or 365
+    _years = max(_date_span / 365, 0.1)
+
+    _cons_rows = conn.execute("""
+        SELECT i.name, i.price, i.unit_price, i.quantity,
+               COALESCE(i.category,'Sonstiges')
+        FROM items i JOIN receipts r ON i.receipt_id=r.id
+        WHERE i.price > 0 AND i.unit_price > 0
+    """).fetchall()
+
+    _cons = {}
+    for _cn, _cp, _cu, _cq, _cc in _cons_rows:
+        _key = _grp(_cn)   # ggf. Gruppenname
+        if _key not in _cons:
+            _cons[_key] = {'kg': 0.0, 'stk': 0, 'is_weight': False, 'cat': _cc}
+        if _cq == 1 and abs(_cu - _cp) > 0.01:
+            # Gewichtsartikel: kg = Preis / EUR/kg
+            _cons[_key]['is_weight'] = True
+            _cons[_key]['kg'] += _cp / _cu
+        else:
+            _cons[_key]['stk'] += _cq
+
+    consumption_kg = sorted([
+        {'n': n, 'cat': d['cat'],
+         'kg_total': round(d['kg'], 2),
+         'kg_year':  round(d['kg'] / _years, 2)}
+        for n, d in _cons.items() if d['is_weight'] and d['kg'] > 0.05
+    ], key=lambda x: x['kg_year'], reverse=True)
+
+    consumption_stk = sorted([
+        {'n': n, 'cat': d['cat'],
+         'stk_total': d['stk'],
+         'stk_year':  round(d['stk'] / _years, 1),
+         'days_per':  round(_date_span / d['stk'], 1) if d['stk'] > 0 else None}
+        for n, d in _cons.items() if not d['is_weight'] and d['stk'] > 1
+    ], key=lambda x: x['stk_year'], reverse=True)[:60]
+
+    # Wiederbestellungs-Prognose
+    _rd_rows = conn.execute("""
+        SELECT i.name, r.date FROM items i
+        JOIN receipts r ON i.receipt_id=r.id
+        ORDER BY i.name, r.date
+    """).fetchall()
+    _rd_map = defaultdict(list)
+    for _rn, _rdate in _rd_rows:
+        _rd_map[_grp(_rn)].append(_rdate)
+
+    _today_d = datetime.now().date()
+    reorder = []
+    for _rn, _rdates in _rd_map.items():
+        _uniq = sorted(set(_rdates))
+        if len(_uniq) < 2:
+            continue
+        _intervals = [
+            (datetime.strptime(_uniq[i], '%Y-%m-%d').date()
+             - datetime.strptime(_uniq[i-1], '%Y-%m-%d').date()).days
+            for i in range(1, len(_uniq))
+        ]
+        _avg_iv = round(sum(_intervals) / len(_intervals))
+        _last_d = datetime.strptime(_uniq[-1], '%Y-%m-%d').date()
+        _pred_d = _last_d + _td(days=_avg_iv)
+        _days_until = (_pred_d - _today_d).days
+        reorder.append({
+            'n': _rn,
+            'last': _uniq[-1],
+            'interval': _avg_iv,
+            'predicted': _pred_d.strftime('%Y-%m-%d'),
+            'days': _days_until,
+            'purchases': len(_uniq),
+        })
+    reorder.sort(key=lambda x: x['days'])
+
     # ── JSON für JavaScript ─────────────────────────────────────────────────
 
     month_labels_js = json.dumps([m for m,_,_ in monthly])
@@ -725,6 +941,21 @@ def generate_report(conn: sqlite3.Connection):
     bonus_total_earned = bonus_total[0] or 0
     bonus_current_bal  = bonus_total[1] or 0
     bonus_avg_pct      = bonus_total[2] or 0
+
+    groups_js          = json.dumps(_groups,          ensure_ascii=False)
+    consumption_kg_js  = json.dumps(consumption_kg,  ensure_ascii=False)
+    consumption_stk_js = json.dumps(consumption_stk, ensure_ascii=False)
+    reorder_js         = json.dumps(reorder,          ensure_ascii=False)
+    basket_js          = json.dumps(basket_pairs, ensure_ascii=False)
+    seasonal_cats_js   = json.dumps(_seas_cats)
+    seasonal_data_js   = json.dumps({s: [_seas_map[s].get(c, 0) for c in _seas_cats] for s in _seasons_ord})
+    price_alarm_js     = json.dumps(price_alarm, ensure_ascii=False)
+    price_vol_js       = json.dumps(_price_vol, ensure_ascii=False)
+    forecast_js        = json.dumps({
+        'month': _curr_month, 'spent': _curr_spending, 'forecast': _forecast,
+        'hist_avg': float(_hist_avg_row), 'vs_avg': _vs_avg,
+        'days_elapsed': _days_elapsed, 'days_total': _days_in_month, 'trips': _curr_trips,
+    })
 
     # ── HTML-Tabellen ───────────────────────────────────────────────────────
 
@@ -838,7 +1069,8 @@ tr.expandable-row:hover .expand-toggle{{color:#cc0000}}
 input[type=text],input[type=search]{{width:100%;padding:.5rem .8rem;border:1px solid #ddd;
   border-radius:6px;font-size:.9rem;margin-bottom:.8rem}}
 input:focus{{outline:2px solid #cc000066;border-color:#cc0000}}
-.scroll{{max-height:420px;overflow-y:auto}}
+.scroll{{max-height:420px;overflow-y:auto;scrollbar-width:none;-ms-overflow-style:none}}
+.scroll::-webkit-scrollbar{{display:none}}
 .badge{{display:inline-block;background:#cc000015;color:#cc0000;border-radius:4px;
         padding:.1rem .45rem;font-size:.78rem;font-weight:600}}
 #trend-picker{{display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:1rem;
@@ -870,6 +1102,9 @@ footer{{text-align:center;padding:2rem;color:#aaa;font-size:.78rem}}
   <button onclick="showTab('stats')">Statistiken</button>
   <button onclick="showTab('positions')">Alle Positionen</button>
   <button onclick="showTab('receipts')">Alle Belege</button>
+  <button onclick="showTab('verbrauch')">Verbrauch</button>
+  <button onclick="showTab('gruppen')">Gruppen</button>
+  <button onclick="showTab('extras')">Extras</button>
 </nav>
 
 <!-- ═══════════════════════════════════════════ DASHBOARD ═══ -->
@@ -881,6 +1116,11 @@ footer{{text-align:center;padding:2rem;color:#aaa;font-size:.78rem}}
     <div class="stat"><div class="val">{feur(stats[2])}</div><div class="lbl">Ø pro Einkauf</div></div>
     <div class="stat"><div class="val">{avg_per_month}</div><div class="lbl">Ø pro Monat</div></div>
   </div>
+
+  <section>
+    <h2>Hochrechnung – aktueller Monat</h2>
+    <div id="forecast-wrap"></div>
+  </section>
 
   <section>
     <h2>Monatliche Ausgaben</h2>
@@ -939,6 +1179,38 @@ footer{{text-align:center;padding:2rem;color:#aaa;font-size:.78rem}}
     <div id="trend-picker"></div>
     <div class="chart-wrap" style="height:420px"><canvas id="trendChart"></canvas></div>
   </section>
+
+  <div class="two-col">
+    <section>
+      <h2>Größte Preisschwankung</h2>
+      <div class="scroll" style="max-height:380px">
+      <table id="vol-high-table">
+        <thead><tr>
+          <th>Artikel</th>
+          <th class="num">Min</th>
+          <th class="num">Max</th>
+          <th class="num">Käufe</th>
+          <th class="num">Schwankung</th>
+        </tr></thead>
+        <tbody id="vol-high-body"></tbody>
+      </table>
+      </div>
+    </section>
+    <section>
+      <h2>Stabilste Preise</h2>
+      <div class="scroll" style="max-height:380px">
+      <table id="vol-low-table">
+        <thead><tr>
+          <th>Artikel</th>
+          <th class="num">Preis</th>
+          <th class="num">Käufe</th>
+          <th class="num">Schwankung</th>
+        </tr></thead>
+        <tbody id="vol-low-body"></tbody>
+      </table>
+      </div>
+    </section>
+  </div>
 </div>
 </div>
 
@@ -979,6 +1251,24 @@ footer{{text-align:center;padding:2rem;color:#aaa;font-size:.78rem}}
         <div style="font-size:.85rem;color:#777;margin-bottom:.4rem">Bonus-Rate pro Monat (% des Umsatzes)</div>
         <div class="chart-wrap"><canvas id="bonusPctChart"></canvas></div>
       </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Preis-Alarm <span style="font-size:.82rem;font-weight:400;color:#888">– letzter Kauf &gt; 10 % über Ø-Preis</span></h2>
+    <div id="alarm-count" style="font-size:.82rem;color:#888;margin-bottom:.5rem"></div>
+    <div class="scroll" style="max-height:400px">
+    <table id="alarm-table">
+      <thead><tr>
+        <th>Artikel</th>
+        <th class="num">Ø Preis</th>
+        <th class="num">Letzter Preis</th>
+        <th class="num">Abweichung</th>
+        <th class="num">Datum</th>
+        <th class="num">Käufe</th>
+      </tr></thead>
+      <tbody id="alarm-body"></tbody>
+    </table>
     </div>
   </section>
 
@@ -1029,7 +1319,7 @@ footer{{text-align:center;padding:2rem;color:#aaa;font-size:.78rem}}
           <th class="sortable" data-key="n" onclick="sortPositions(this)">Artikel</th>
           <th class="sortable" data-key="cat" onclick="sortPositions(this)">Kategorie</th>
           <th class="sortable num" data-key="p" onclick="sortPositions(this)">Preis</th>
-          <th class="sortable num" data-key="u" onclick="sortPositions(this)">Einzelpreis</th>
+          <th class="sortable num" data-key="u" onclick="sortPositions(this)">€/Stk od. kg</th>
           <th class="sortable num" data-key="q" onclick="sortPositions(this)">Menge</th>
           <th>PDF</th>
         </tr>
@@ -1065,6 +1355,133 @@ footer{{text-align:center;padding:2rem;color:#aaa;font-size:.78rem}}
 </div>
 </div>
 
+<!-- ═══════════════════════════════════════════ VERBRAUCH ═══ -->
+<div id="page-verbrauch" class="page">
+<div class="container">
+
+  <section>
+    <h2>Wiederbestellungs-Prognose</h2>
+    <div style="display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:.8rem;align-items:center">
+      <button class="ctrl-btn ro-active" onclick="filterReorder('all',this)">Alle</button>
+      <button class="ctrl-btn" onclick="filterReorder('soon',this)">&#9200; Bald (14 Tage)</button>
+      <button class="ctrl-btn" onclick="filterReorder('due',this)">&#9888; Überfällig</button>
+      <input type="search" id="ro-search" placeholder="Artikel filtern…"
+             oninput="filterReorder(_roMode,null)" style="flex:1;min-width:160px;margin:0">
+      <span id="ro-count" style="font-size:.82rem;color:#888;margin-left:auto"></span>
+    </div>
+    <div class="scroll" style="max-height:520px">
+    <table id="ro-table">
+      <thead><tr>
+        <th class="sortable" data-key="n" onclick="sortReorder(this)">Artikel</th>
+        <th class="sortable num" data-key="last" onclick="sortReorder(this)">Letzter Kauf</th>
+        <th class="sortable num" data-key="interval" onclick="sortReorder(this)">Ø Rhythmus</th>
+        <th class="sortable num" data-key="predicted" onclick="sortReorder(this)">Voraussichtlich</th>
+        <th class="sortable sort-asc num" data-key="days" onclick="sortReorder(this)">Tage</th>
+        <th class="sortable num" data-key="purchases" onclick="sortReorder(this)">Käufe</th>
+      </tr></thead>
+      <tbody id="ro-body"></tbody>
+    </table>
+    </div>
+  </section>
+
+  <div class="two-col">
+    <section>
+      <h2>Jahresverbrauch – Gewichtsartikel</h2>
+      <input type="search" id="kg-search" placeholder="Artikel filtern…" oninput="filterKg()" style="max-width:320px">
+      <div class="scroll" style="max-height:480px">
+      <table id="kg-table">
+        <thead><tr>
+          <th>Artikel</th>
+          <th class="sortable sort-desc num" data-key="kg_year" onclick="sortKg(this)">kg/Jahr</th>
+          <th class="sortable num" data-key="kg_total" onclick="sortKg(this)">Gesamt</th>
+        </tr></thead>
+        <tbody id="kg-body"></tbody>
+      </table>
+      </div>
+    </section>
+    <section>
+      <h2>Jahresverbrauch – Stückzahlen</h2>
+      <input type="search" id="stk-search" placeholder="Artikel filtern…" oninput="filterStk()" style="max-width:320px">
+      <div class="scroll" style="max-height:480px">
+      <table id="stk-table">
+        <thead><tr>
+          <th>Artikel</th>
+          <th class="sortable sort-desc num" data-key="stk_year" onclick="sortStk(this)">Stk/Jahr</th>
+          <th class="sortable num" data-key="days_per" onclick="sortStk(this)">Hält ø</th>
+          <th class="sortable num" data-key="stk_total" onclick="sortStk(this)">Gesamt</th>
+        </tr></thead>
+        <tbody id="stk-body"></tbody>
+      </table>
+      </div>
+    </section>
+  </div>
+
+</div>
+</div>
+
+<!-- ═══════════════════════════════════════════ GRUPPEN ═══ -->
+<div id="page-gruppen" class="page">
+<div class="container">
+  <section>
+    <h2>Artikel-Gruppen verwalten</h2>
+    <p style="font-size:.87rem;color:#666;margin-bottom:1rem">
+      Fasse ähnliche Artikel zusammen (z.B. <em>BANANE BIO</em> + <em>BANANE CHIQUITA</em> → <em>Banane</em>).
+      Trage einen Gruppenname in das Feld ein – alle Artikel mit gleichem Gruppenname werden zusammengefasst.
+      Feld leer lassen = kein Gruppieren.<br>
+      <strong>Speichern</strong> schreibt direkt in die <code>groups.json</code> – danach Auswertung neu starten.
+    </p>
+    <div style="display:flex;gap:.5rem;align-items:center;margin-bottom:.8rem;flex-wrap:wrap">
+      <input type="search" id="grp-search" placeholder="Artikel filtern…"
+             oninput="filterGruppen()" style="flex:1;min-width:200px;margin:0">
+      <button class="ctrl-btn" onclick="clearAllGroups()">Alle Gruppen löschen</button>
+      <button id="grp-save-btn" onclick="saveGroups()"
+              style="background:#cc0000;color:#fff;border:none;border-radius:6px;
+                     padding:.5rem 1.2rem;cursor:pointer;font-size:.92rem;font-weight:600">
+        Gruppen speichern
+      </button>
+    </div>
+    <div id="grp-summary" style="font-size:.82rem;color:#888;margin-bottom:.6rem"></div>
+    <div class="scroll" style="max-height:600px">
+    <table id="grp-table">
+      <thead><tr>
+        <th>Artikel (Original)</th>
+        <th>Kategorie</th>
+        <th>Gruppenname <span style="font-weight:400;font-size:.8rem">(leer = keine Gruppe)</span></th>
+      </tr></thead>
+      <tbody id="grp-body"></tbody>
+    </table>
+    </div>
+  </section>
+</div>
+</div>
+
+<!-- ═══════════════════════════════════════════ EXTRAS ═══ -->
+<div id="page-extras" class="page">
+<div class="container">
+
+  <section>
+    <h2>Saisonale Kaufmuster</h2>
+    <div class="chart-wrap" style="height:380px"><canvas id="seasonChart"></canvas></div>
+  </section>
+
+  <section>
+    <h2>Warenkorbanalyse – häufige Artikel-Kombinationen</h2>
+    <input type="search" id="basket-search" placeholder="Artikel filtern…" oninput="filterBasket()" style="max-width:420px">
+    <div class="scroll" style="max-height:520px">
+    <table id="basket-table">
+      <thead><tr>
+        <th class="sortable sort-desc num" data-key="cnt" onclick="sortBasket(this)">Häufigkeit</th>
+        <th class="sortable" data-key="a" onclick="sortBasket(this)">Artikel 1</th>
+        <th class="sortable" data-key="b" onclick="sortBasket(this)">Artikel 2</th>
+      </tr></thead>
+      <tbody id="basket-body"></tbody>
+    </table>
+    </div>
+  </section>
+
+</div>
+</div>
+
 <footer>REWE eBon Analyse &bull; {stats[0]} Kassenbons &bull; {len(all_items)} Positionen</footer>
 
 <script>
@@ -1085,6 +1502,16 @@ const BONUS_EARNED    = {bonus_earned_js};
 const BONUS_BALANCE   = {bonus_balance_js};
 const BONUS_PCT       = {bonus_pct_js};
 const INFLATION       = {inflation_js};
+const GROUPS          = {groups_js};
+const CONSUMPTION_KG  = {consumption_kg_js};
+const CONSUMPTION_STK = {consumption_stk_js};
+const REORDER         = {reorder_js};
+const BASKET          = {basket_js};
+const SEASONAL_CATS   = {seasonal_cats_js};
+const SEASONAL_DATA   = {seasonal_data_js};
+const PRICE_ALARM     = {price_alarm_js};
+const PRICE_VOL       = {price_vol_js};
+const FORECAST        = {forecast_js};
 
 // ── Navigation ─────────────────────────────────────────────────────────────
 function showTab(id) {{
@@ -1096,6 +1523,9 @@ function showTab(id) {{
   if (id === 'stats'     && !window._statsInit) initStats();
   if (id === 'positions' && !window._posInit)   initPositions();
   if (id === 'receipts'  && !window._recInit)   initReceipts();
+  if (id === 'verbrauch' && !window._verbrauchInit) initVerbrauch();
+  if (id === 'gruppen'   && !window._gruppenInit)   initGruppen();
+  if (id === 'extras'    && !window._extrasInit) initExtras();
 }}
 
 // ── Hilfsfunktionen ─────────────────────────────────────────────────────────
@@ -1115,6 +1545,7 @@ function alignHeaders(table) {{
 // Alle statischen Tabellen beim Laden ausrichten
 document.addEventListener('DOMContentLoaded', () => {{
   document.querySelectorAll('table').forEach(alignHeaders);
+  renderForecast();
 }});
 
 function eur(v) {{
@@ -1285,6 +1716,34 @@ function initTrends() {{
   window._trendInit = true;
   buildPicker();
   updateTrendChart();
+  // Volatilität-Tabellen befüllen
+  const top = PRICE_VOL.slice(0, 20);
+  const stable = PRICE_VOL.slice().reverse().slice(0, 20);
+  document.getElementById('vol-high-body').innerHTML = top.map(r =>
+    `<tr style="cursor:pointer" onclick="selectSingleItem('${{r.n.replace(/'/g,"\\'")}}')">
+      <td>${{r.n}}<br><small style="color:#888">${{r.cnt}} Monate</small></td>
+      <td class="num">${{r.min.toFixed(2).replace('.',',')}} €</td>
+      <td class="num">${{r.max.toFixed(2).replace('.',',')}} €</td>
+      <td class="num">${{r.buys}}×</td>
+      <td class="num" style="color:#e63946;font-weight:600">± ${{r.swing.toFixed(1).replace('.',',')}} %</td>
+    </tr>`
+  ).join('');
+  document.getElementById('vol-low-body').innerHTML = stable.map(r =>
+    `<tr style="cursor:pointer" onclick="selectSingleItem('${{r.n.replace(/'/g,"\\'")}}')">
+      <td>${{r.n}}</td>
+      <td class="num">${{r.avg.toFixed(2).replace('.',',')}} €</td>
+      <td class="num">${{r.buys}}×</td>
+      <td class="num" style="color:#2a9d8f;font-weight:600">± ${{r.swing.toFixed(1).replace('.',',')}} %</td>
+    </tr>`
+  ).join('');
+}}
+
+function selectSingleItem(name) {{
+  Object.keys(selectedItems).forEach(k => delete selectedItems[k]);
+  selectedItems[name] = true;
+  buildPicker();
+  updateTrendChart();
+  document.getElementById('trendChart').scrollIntoView({{behavior:'smooth', block:'center'}});
 }}
 
 // ── Statistiken ──────────────────────────────────────────────────────────────
@@ -1385,6 +1844,7 @@ function initStats() {{
 
   // Inflation-Tabelle initial befüllen
   renderInflation(INFLATION);
+  renderPriceAlarm();
 }}
 
 let _infMode = 'all';
@@ -1457,8 +1917,8 @@ function applyPositions() {{
       <td>${{r.n}}</td>
       <td><span class="badge">${{r.cat}}</span></td>
       <td class="num">${{eur(r.p)}}</td>
-      <td class="num">${{r.q > 1 ? eur(r.u) : '–'}}</td>
-      <td class="num">${{r.q > 1 ? r.q + '×' : '–'}}</td>
+      <td class="num">${{r.u > 0 ? (r.q < 1 ? eur(r.u)+' /kg' : eur(r.u)+' /Stk') : '–'}}</td>
+      <td class="num">${{r.q > 1 ? r.q+'×' : r.q < 1 ? (r.q*1000).toFixed(0)+' g' : '–'}}</td>
       <td><a href="${{pdfPath}}" target="_blank" class="pdf-link">📄</a></td>
     </tr>`;
   }}).join('');
@@ -1558,6 +2018,332 @@ function toggleReceipt(idx, row) {{
 }}
 
 function filterReceipts() {{ applyReceipts(); }}
+
+// ── Gruppen ──────────────────────────────────────────────────────────────────
+// Reverse map: alias -> canonical
+const _GRPMAP = {{}};
+for (const [canon, aliases] of Object.entries(GROUPS))
+  for (const a of aliases) _GRPMAP[a] = canon;
+
+// Alle eindeutigen Artikelnamen mit Kategorie (aus ALL_ITEMS)
+const _ALL_NAMES = (() => {{
+  const seen = {{}};
+  for (const r of ALL_ITEMS) if (!seen[r.n]) seen[r.n] = r.cat;
+  return Object.entries(seen).sort((a,b) => a[0].localeCompare(b[0]));
+}})();
+
+let _grpAssign = {{}};  // name -> canonical (working copy)
+
+function _initGrpAssign() {{
+  _grpAssign = {{}};
+  for (const [name] of _ALL_NAMES) {{
+    const g = _GRPMAP[name];
+    if (g) _grpAssign[name] = g;
+  }}
+}}
+
+function renderGruppen(names) {{
+  const body = document.getElementById('grp-body');
+  body.innerHTML = names.map(([name, cat]) => {{
+    const val = _grpAssign[name] || '';
+    const esc = name.replace(/"/g, '&quot;');
+    const isGrp = !!val;
+    const rowStyle = isGrp ? 'background:#fffdf0;border-left:3px solid #e9c46a' : '';
+    const inputStyle = isGrp
+      ? 'width:100%;padding:.3rem .5rem;border:1px solid #e9c46a;border-radius:4px;font-size:.85rem;background:#fffdf0;font-weight:600'
+      : 'width:100%;padding:.3rem .5rem;border:1px solid #ddd;border-radius:4px;font-size:.85rem';
+    return `<tr style="${{rowStyle}}">
+      <td>${{name}}</td>
+      <td><span class="badge">${{cat}}</span></td>
+      <td><input type="text" value="${{val}}" data-name="${{esc}}"
+           placeholder="Gruppenname…"
+           oninput="_grpAssign[this.dataset.name]=this.value.trim(); updateGrpSummary(); renderGruppen(_ALL_NAMES.filter(([n])=>{{const q=(document.getElementById('grp-search')?.value||'').toLowerCase();return !q||n.toLowerCase().includes(q);}}));"
+           style="${{inputStyle}}"></td>
+    </tr>`;
+  }}).join('');
+}}
+
+function filterGruppen() {{
+  const q = (document.getElementById('grp-search')?.value || '').toLowerCase();
+  const names = q ? _ALL_NAMES.filter(([n]) => n.toLowerCase().includes(q)) : _ALL_NAMES;
+  renderGruppen(names);
+}}
+
+function updateGrpSummary() {{
+  const assigned = Object.values(_grpAssign).filter(v => v).length;
+  const groups   = new Set(Object.values(_grpAssign).filter(v => v)).size;
+  document.getElementById('grp-summary').textContent =
+    assigned + ' Artikel in ' + groups + ' Gruppen';
+}}
+
+function clearAllGroups() {{
+  _grpAssign = {{}};
+  filterGruppen();
+  updateGrpSummary();
+}}
+
+function saveGroups() {{
+  const result = {{}};
+  for (const [name, canon] of Object.entries(_grpAssign)) {{
+    if (!canon) continue;
+    if (!result[canon]) result[canon] = [];
+    result[canon].push(name);
+  }}
+  const btn = document.getElementById('grp-save-btn');
+  btn.disabled = true;
+  btn.textContent = 'Speichern…';
+  fetch('http://localhost:{GROUPS_SERVER_PORT}/save-groups', {{
+    method: 'POST',
+    headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify(result, null, 2),
+  }})
+  .then(r => {{
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    btn.textContent = '✓ Gespeichert';
+    btn.style.background = '#2a9d8f';
+    setTimeout(() => {{
+      btn.disabled = false;
+      btn.textContent = 'Gruppen speichern';
+      btn.style.background = '#cc0000';
+    }}, 2500);
+  }})
+  .catch(() => {{
+    btn.disabled = false;
+    btn.textContent = 'Gruppen speichern';
+    alert('Server nicht erreichbar.\\nBitte "Auswertung starten" über das Terminal ausführen.');
+  }});
+}}
+
+function initGruppen() {{
+  window._gruppenInit = true;
+  _initGrpAssign();
+  renderGruppen(_ALL_NAMES);
+  updateGrpSummary();
+  alignHeaders('grp-table');
+}}
+
+// ── Verbrauch ────────────────────────────────────────────────────────────────
+let _roMode = 'all';
+let _roSort = {{ key: 'days', dir: 1 }};
+
+function _reorderColor(days) {{
+  if (days < 0)  return '#cc0000';
+  if (days <= 7) return '#e07b00';
+  if (days <= 14) return '#c9a227';
+  return '#2a9d8f';
+}}
+
+function renderReorder(data) {{
+  document.getElementById('ro-count').textContent = data.length + ' Artikel';
+  document.getElementById('ro-body').innerHTML = data.map(r => {{
+    const col = _reorderColor(r.days);
+    const daysStr = r.days < 0
+      ? `<span style="color:#cc0000;font-weight:600">${{r.days}} Tage</span>`
+      : `<span style="color:${{col}};font-weight:600">+${{r.days}} Tage</span>`;
+    return `<tr>
+      <td>${{r.n}}</td>
+      <td class="num">${{isoDE(r.last)}}</td>
+      <td class="num">${{r.interval}} Tage</td>
+      <td class="num">${{isoDE(r.predicted)}}</td>
+      <td class="num">${{daysStr}}</td>
+      <td class="num">${{r.purchases}}</td>
+    </tr>`;
+  }}).join('');
+}}
+
+function sortReorder(th) {{
+  const key = th.dataset.key;
+  _roSort = _roSort.key === key ? {{key, dir: _roSort.dir * -1}} : {{key, dir: 1}};
+  document.querySelectorAll('#ro-table th').forEach(h => h.classList.remove('sort-asc','sort-desc'));
+  th.classList.add(_roSort.dir === 1 ? 'sort-asc' : 'sort-desc');
+  filterReorder(_roMode, null);
+}}
+
+function filterReorder(mode, btn) {{
+  _roMode = mode || _roMode;
+  if (btn) {{
+    document.querySelectorAll('.ro-active').forEach(b => b.classList.remove('ro-active'));
+    btn.classList.add('ro-active');
+  }}
+  const q = (document.getElementById('ro-search')?.value || '').toLowerCase();
+  let data = REORDER;
+  if (_roMode === 'soon') data = data.filter(r => r.days >= 0 && r.days <= 14);
+  if (_roMode === 'due')  data = data.filter(r => r.days < 0);
+  if (q) data = data.filter(r => r.n.toLowerCase().includes(q));
+  const {{key, dir}} = _roSort;
+  data = data.slice().sort((a, b) => {{
+    let av = a[key], bv = b[key];
+    if (typeof av === 'string') {{ av = av.toLowerCase(); bv = bv.toLowerCase(); }}
+    return av < bv ? -dir : av > bv ? dir : 0;
+  }});
+  renderReorder(data);
+}}
+
+let _kgSort = {{ key: 'kg_year', dir: -1 }};
+function _applyKg() {{
+  const q = (document.getElementById('kg-search')?.value || '').toLowerCase();
+  let data = q ? CONSUMPTION_KG.filter(r => r.n.toLowerCase().includes(q)) : CONSUMPTION_KG.slice();
+  const {{key, dir}} = _kgSort;
+  data = data.slice().sort((a,b) => (a[key]<b[key]?-dir:a[key]>b[key]?dir:0));
+  document.getElementById('kg-body').innerHTML = data.map(r =>
+    `<tr><td>${{r.n}}<br><span class="badge">${{r.cat}}</span></td>
+     <td class="num"><strong>${{r.kg_year.toFixed(2).replace('.',',')}} kg</strong></td>
+     <td class="num" style="color:#888">${{r.kg_total.toFixed(2).replace('.',',')}} kg</td></tr>`
+  ).join('');
+}}
+function filterKg() {{ _applyKg(); }}
+function sortKg(th) {{
+  const key = th.dataset.key;
+  _kgSort = _kgSort.key===key ? {{key,dir:_kgSort.dir*-1}} : {{key,dir:-1}};
+  document.querySelectorAll('#kg-table th').forEach(h=>h.classList.remove('sort-asc','sort-desc'));
+  th.classList.add(_kgSort.dir===1?'sort-asc':'sort-desc');
+  _applyKg();
+}}
+
+let _stkSort = {{ key: 'stk_year', dir: -1 }};
+function _applyStk() {{
+  const q = (document.getElementById('stk-search')?.value || '').toLowerCase();
+  let data = q ? CONSUMPTION_STK.filter(r => r.n.toLowerCase().includes(q)) : CONSUMPTION_STK.slice();
+  const {{key, dir}} = _stkSort;
+  data = data.slice().sort((a,b) => (a[key]<b[key]?-dir:a[key]>b[key]?dir:0));
+  const _stkGrpNames = new Set(Object.keys(GROUPS));
+  document.getElementById('stk-body').innerHTML = data.map(r => {{
+    const isGrp = _stkGrpNames.has(r.n);
+    const grpMark = isGrp ? ' <span style="font-size:.7rem;background:#e9c46a33;color:#b8860b;border-radius:3px;padding:.1rem .3rem">Gruppe</span>' : '';
+    const rowBg = isGrp ? 'background:#fffdf0' : '';
+    const daysStr = r.days_per != null ? r.days_per.toFixed(1).replace('.',',') + ' Tage' : '–';
+    return `<tr style="${{rowBg}}">
+      <td>${{r.n}}${{grpMark}}<br><span class="badge">${{r.cat}}</span></td>
+      <td class="num"><strong>${{r.stk_year.toFixed(1).replace('.',',')}} Stk</strong></td>
+      <td class="num" style="color:#457b9d">${{daysStr}}</td>
+      <td class="num" style="color:#888">${{r.stk_total}} Stk</td></tr>`;
+  }}).join('');
+}}
+function filterStk() {{ _applyStk(); }}
+function sortStk(th) {{
+  const key = th.dataset.key;
+  _stkSort = _stkSort.key===key ? {{key,dir:_stkSort.dir*-1}} : {{key,dir:-1}};
+  document.querySelectorAll('#stk-table th').forEach(h=>h.classList.remove('sort-asc','sort-desc'));
+  th.classList.add(_stkSort.dir===1?'sort-asc':'sort-desc');
+  _applyStk();
+}}
+
+function initVerbrauch() {{
+  window._verbrauchInit = true;
+  filterReorder('all', document.querySelector('.ro-active'));
+  _applyKg();
+  _applyStk();
+  alignHeaders('ro-table');
+  alignHeaders('kg-table');
+  alignHeaders('stk-table');
+}}
+
+// ── Forecast ────────────────────────────────────────────────────────────────
+function renderForecast() {{
+  const wrap = document.getElementById('forecast-wrap');
+  if (!wrap) return;
+  const f = FORECAST;
+  const pct = Math.min(f.days_elapsed / f.days_total * 100, 100).toFixed(0);
+  const vsSign = f.vs_avg >= 0 ? '+' : '';
+  const vsColor = f.vs_avg > 10 ? '#cc0000' : f.vs_avg < -10 ? '#2a9d8f' : '#555';
+  wrap.innerHTML = `
+    <div class="stats-grid" style="margin-bottom:1rem">
+      <div class="stat"><div class="val" style="font-size:1.3rem">${{eur(f.spent)}}</div>
+        <div class="lbl">Bisher (Tag ${{f.days_elapsed}}/${{f.days_total}})</div></div>
+      <div class="stat"><div class="val" style="font-size:1.3rem">${{eur(f.forecast)}}</div>
+        <div class="lbl">Hochrechnung Monatsende</div></div>
+      <div class="stat"><div class="val" style="font-size:1.3rem">${{eur(f.hist_avg)}}</div>
+        <div class="lbl">Ø letzte 6 Monate</div></div>
+      <div class="stat"><div class="val" style="font-size:1.3rem;color:${{vsColor}}">${{vsSign}}${{f.vs_avg.toFixed(1).replace('.',',')}} %</div>
+        <div class="lbl">Hochrechnung vs. Ø</div></div>
+    </div>
+    <div style="background:#f0f2f5;border-radius:8px;padding:.8rem;font-size:.85rem;color:#666">
+      <div style="display:flex;justify-content:space-between;margin-bottom:.5rem">
+        <span>${{f.trips}} Einkäufe bisher</span>
+        <span>${{pct}} % des Monats vergangen</span>
+      </div>
+      <div style="background:#ddd;border-radius:4px;height:8px">
+        <div style="background:#cc0000;width:${{pct}}%;height:8px;border-radius:4px"></div>
+      </div>
+    </div>`;
+}}
+
+// ── Preis-Alarm ──────────────────────────────────────────────────────────────
+function renderPriceAlarm() {{
+  const el = document.getElementById('alarm-count');
+  if (el) el.textContent = PRICE_ALARM.length + ' Artikel über Durchschnitt';
+  const body = document.getElementById('alarm-body');
+  if (!body) return;
+  body.innerHTML = PRICE_ALARM.map(r => `<tr>
+    <td>${{r.n}}</td>
+    <td class="num">${{eur(r.avg)}}</td>
+    <td class="num"><strong>${{eur(r.last)}}</strong></td>
+    <td class="num"><span class="pct-pos">+${{r.dev.toFixed(1).replace('.',',')}} %</span></td>
+    <td class="num">${{isoDE(r.date)}}</td>
+    <td class="num">${{r.cnt}}</td>
+  </tr>`).join('');
+  alignHeaders('alarm-table');
+}}
+
+// ── Saisonale Muster ─────────────────────────────────────────────────────────
+function renderSeasonChart() {{
+  const palette = ['#2a9d8f','#e9c46a','#e63946','#457b9d','#f4a261',
+                   '#264653','#52b788','#9b2226','#6d6875','#b5838d',
+                   '#e76f51','#0077b6','#a7c957','#c77dff','#4caf50'];
+  const seasons = ['Frühling','Sommer','Herbst','Winter'];
+  const datasets = SEASONAL_CATS.map((cat, i) => ({{
+    label: cat,
+    data: seasons.map(s => (SEASONAL_DATA[s] || [])[i] || 0),
+    backgroundColor: palette[i % palette.length] + 'bb',
+    borderColor: palette[i % palette.length],
+    borderWidth: 1,
+  }}));
+  new Chart(document.getElementById('seasonChart'), {{
+    type: 'bar',
+    data: {{ labels: seasons, datasets }},
+    options: {{
+      responsive: true, maintainAspectRatio: false,
+      plugins: {{ legend: {{ position: 'bottom', labels: {{ boxWidth: 12, font: {{ size: 10 }} }} }} }},
+      scales: {{
+        x: {{ stacked: true }},
+        y: {{ stacked: true, ticks: {{ callback: v => '€ ' + v.toFixed(0) }} }},
+      }}
+    }}
+  }});
+}}
+
+// ── Warenkorbanalyse ─────────────────────────────────────────────────────────
+let _bSort = {{ key: 'cnt', dir: -1 }};
+function _applyBasket() {{
+  const q = (document.getElementById('basket-search')?.value || '').toLowerCase();
+  let data = q
+    ? BASKET.filter(r => r.a.toLowerCase().includes(q) || r.b.toLowerCase().includes(q))
+    : BASKET.slice();
+  const {{key, dir}} = _bSort;
+  data = data.slice().sort((a, b) => {{
+    let av = a[key], bv = b[key];
+    if (typeof av === 'string') {{ av = av.toLowerCase(); bv = bv.toLowerCase(); }}
+    return av < bv ? -dir : av > bv ? dir : 0;
+  }});
+  document.getElementById('basket-body').innerHTML = data.map(r =>
+    `<tr><td class="num"><strong>${{r.cnt}}×</strong></td><td>${{r.a}}</td><td>${{r.b}}</td></tr>`
+  ).join('');
+}}
+function filterBasket() {{ _applyBasket(); }}
+function sortBasket(th) {{
+  const key = th.dataset.key;
+  _bSort = _bSort.key === key ? {{key, dir: _bSort.dir * -1}} : {{key, dir: key === 'cnt' ? -1 : 1}};
+  document.querySelectorAll('#basket-table th').forEach(h => h.classList.remove('sort-asc','sort-desc'));
+  th.classList.add(_bSort.dir === 1 ? 'sort-asc' : 'sort-desc');
+  _applyBasket();
+}}
+
+function initExtras() {{
+  window._extrasInit = true;
+  renderSeasonChart();
+  _applyBasket();
+  alignHeaders('basket-table');
+}}
 </script>
 </body>
 </html>"""
@@ -1570,10 +2356,7 @@ function filterReceipts() {{ applyReceipts(); }}
 # ── Hauptprogramm ──────────────────────────────────────────────────────────────
 
 def main():
-    eml_files = sorted(IMPORT_DIR.glob("Dein REWE eBon*.eml"))
-    if not eml_files:
-        print("Keine EML-Dateien gefunden.")
-        sys.exit(1)
+    eml_files = sorted(IMPORT_DIR.glob("*.eml"))
 
     print(f"Gefunden: {len(eml_files)} EML-Dateien")
 
@@ -1636,5 +2419,60 @@ def main():
     print(f"\nÖffne Report: open '{REPORT_PATH}'")
 
 
+# ── Lokaler Gruppen-Server ─────────────────────────────────────────────────────
+
+class _GroupsHandler(BaseHTTPRequestHandler):
+    def _cors(self):
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+
+    def do_OPTIONS(self):
+        self.send_response(200); self._cors(); self.end_headers()
+
+    def do_GET(self):
+        if self.path == '/ping':
+            self.send_response(200); self._cors(); self.end_headers()
+            self.wfile.write(b'pong')
+
+    def do_POST(self):
+        if self.path == '/save-groups':
+            length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(length)
+            try:
+                groups = json.loads(body)
+                (SCRIPT_DIR / 'groups.json').write_text(
+                    json.dumps(groups, ensure_ascii=False, indent=2), 'utf-8')
+                self.send_response(200); self._cors()
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(b'{"ok":true}')
+                print(f"\n  groups.json gespeichert ({len(groups)} Gruppen)")
+            except Exception as e:
+                self.send_response(500); self._cors(); self.end_headers()
+                self.wfile.write(str(e).encode())
+
+    def log_message(self, *args): pass  # kein Server-Log
+
+
+def _start_groups_server():
+    # Prüfen ob Port frei ist
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        if s.connect_ex(('localhost', GROUPS_SERVER_PORT)) == 0:
+            print(f"  Port {GROUPS_SERVER_PORT} belegt – Server läuft bereits.")
+            return
+    server = HTTPServer(('localhost', GROUPS_SERVER_PORT), _GroupsHandler)
+    print(f"\n  Gruppen-Server aktiv (Port {GROUPS_SERVER_PORT})")
+    print("  Fenster schließen zum Beenden.\n")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+
 if __name__ == '__main__':
+    serve = '--serve' in sys.argv
     main()
+    if serve:
+        subprocess.Popen(['open', str(REPORT_PATH)])
+        _start_groups_server()
