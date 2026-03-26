@@ -5,11 +5,14 @@ Erstellt einen interaktiven HTML-Bericht aus den eigenen Einkaufsdaten.
 
 ## Features
 
-- 📊 **Dashboard** – Monatsausgaben, Jahresübersicht, Top-Artikel, Kategorien
-- 📈 **Preisentwicklung** – Preishistorie einzelner Artikel über die Zeit
-- 🔍 **Statistiken** – Wochentag-Analyse, Inflations-Tracker, Bonus-Guthaben, Bonus-Rate pro Monat (% des Umsatzes)
-- 🗂 **Alle Positionen** – Suchbar & sortierbar nach allen Spalten
+- 📊 **Dashboard** – Monatsausgaben, Jahresübersicht, Top-30-Artikel (nach Häufigkeit & Ausgaben), Kategorien, Warenkorbanalyse, Saisonale Muster, Monatsforecast
+- 📈 **Preisentwicklung** – Preishistorie einzelner Artikel; Rangliste der größten Preisschwankungen und stabilsten Preise (je mit Min/Max/Käufe-Angabe)
+- 🔍 **Statistiken** – Wochentag-Analyse, Inflations-Tracker, Bonus-Guthaben, Bonus-Rate, Preis-Alarm (letzter Kauf > 10 % über Durchschnitt)
+- 🗂 **Alle Positionen** – Suchbar & sortierbar; zeigt €/kg für Gewichtsartikel und Menge in Gramm
 - 🧾 **Alle Belege** – Aufklappbar mit Detailansicht, direkter PDF-Link
+- 🥦 **Verbrauch** – Jahresverbrauch in kg und Stückzahlen, „Hält ø X Tage"-Spalte, Wiederbestellungs-Prognose mit sortierbaren Spalten
+- 🏷 **Gruppen** – Ähnliche Artikel zusammenfassen (z. B. alle Bananen-Varianten), direkt im Browser editierbar; Gruppierungen wirken auf Dashboard, Verbrauch und Warenkorbanalyse
+- 🤖 **Automatischer Mail-Import** – Neuer eBon in Apple Mail → EML wird automatisch exportiert und verarbeitet (via launchd + AppleScript)
 
 ## Voraussetzungen
 
@@ -27,7 +30,8 @@ Python 3.9+ wird benötigt.
 ### Per Terminal
 ```bash
 cd Rewe/
-python3 rewe_analyze.py
+python3 rewe_analyze.py          # Auswertung + Report generieren
+python3 rewe_analyze.py --serve  # wie oben + Browser öffnen + Gruppen-Server starten
 ```
 
 ### Neue Kassenbons hinzufügen
@@ -48,11 +52,13 @@ und **löscht sie danach automatisch** aus dem `import/`-Ordner.
 
 ```
 Rewe/
-├── import/                  ← EML, oder PDF-Dateien hier ablegen
+├── import/                  ← EML- oder PDF-Dateien hier ablegen
 ├── pdfs/                    ← auto-extrahierte PDFs (wird auto-erstellt)
 ├── rewe_analyze.py          ← Hauptskript
 ├── rewe_ebons.db            ← Datenbank (wird auto-erstellt)
 ├── rewe_report.html         ← Bericht (wird auto-erstellt)
+├── groups.json              ← Artikel-Gruppen (wird beim Speichern im Browser erstellt)
+├── export_rewe_mail.sh      ← Mail-Export-Skript (für automatischen Import)
 └── Auswertung starten.command
 ```
 
