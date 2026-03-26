@@ -64,3 +64,7 @@ Rewe/
 
 > **Hinweis:** `import/`, `pdfs/`, `rewe_ebons.db` und `rewe_report.html`
 > enthalten persönliche Daten und sind in `.gitignore` ausgeschlossen.
+
+---
+
+*Dieses Projekt steht in keiner Verbindung zur REWE Group. „REWE" und „eBon" sind Marken der REWE Group.*
