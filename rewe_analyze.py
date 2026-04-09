@@ -162,6 +162,17 @@ BON_RE          = re.compile(r'Bon-Nr\.:(\d+)')
 BONUS_EARNED_RE = re.compile(r'hast du (\d+,\d{2}) EUR')
 BONUS_BAL_RE    = re.compile(r'Aktuelles Bonus-Guthaben: (\d+,\d{2}) EUR')
 
+# ── Shop-Rechnung (Lieferservice) Patterns ────────────────────────────────────
+SHOP_ORDER_RE        = re.compile(r'Bestellnummer:\s*(B-[A-Z0-9]+-[A-Z0-9]+-[A-Z0-9]+)')
+SHOP_DATE_RE         = re.compile(r'Rechnungsdatum:\s*(\d{2})\.(\d{2})\.(\d{4})')
+SHOP_TOTAL_RE        = re.compile(r'^Summe\s+([\d.,]+)\s*€', re.MULTILINE)
+SHOP_BONUS_EARNED_RE = re.compile(r'Gesammeltes Bonus-Guthaben:\s*([\d,]+)\s*€')
+SHOP_BONUS_BAL_RE    = re.compile(r'aktuelles Guthaben beträgt\s+([\d,]+)\s*€')
+SHOP_ITEM_RE         = re.compile(
+    r'^(.+?)\s+(-?\d+)\s+([AB](?:/[AB])?)\s+(\d+,\d{2})\s*€\s+(-?\d+,\d{2})\s*€\s*\*?\s*$'
+)
+SHOP_HEADER_RE       = re.compile(r'^Bezeichnung\s+Menge\s+MwSt')
+
 
 def price_to_float(s: str) -> float:
     return float(s.replace(',', '.'))
@@ -271,6 +282,80 @@ def parse_receipt(text: str):
     return receipt
 
 
+def parse_shop_receipt(text: str):
+    """Parst den Rohtext einer REWE Shop Rechnung (Lieferservice)."""
+    lines = text.splitlines()
+
+    receipt = {
+        'date': None, 'time': None, 'market_id': None, 'bon_nr': None,
+        'total': None, 'bonus_earned': None, 'bonus_balance': None,
+        'receipt_type': 'shop', 'items': [],
+    }
+
+    # Bestellnummer, Datum, Summe, Bonus
+    m = SHOP_ORDER_RE.search(text)
+    if m:
+        receipt['bon_nr'] = m.group(1)
+    m = SHOP_DATE_RE.search(text)
+    if m:
+        day, mon, year = m.groups()
+        receipt['date'] = f"{year}-{int(mon):02d}-{int(day):02d}"
+    m = SHOP_TOTAL_RE.search(text)
+    if m:
+        receipt['total'] = price_to_float(m.group(1))
+    m = SHOP_BONUS_EARNED_RE.search(text)
+    if m:
+        receipt['bonus_earned'] = price_to_float(m.group(1))
+    m = SHOP_BONUS_BAL_RE.search(text)
+    if m:
+        receipt['bonus_balance'] = price_to_float(m.group(1))
+
+    # Artikel-Block: zwischen Header-Zeile und "Summe XX,XX €"
+    in_items = False
+    pending_item = None
+
+    for line in lines:
+        stripped = line.strip()
+
+        if SHOP_HEADER_RE.match(stripped):
+            in_items = True
+            continue
+
+        if in_items and SHOP_TOTAL_RE.match(stripped):
+            break
+
+        if not in_items:
+            continue
+
+        item_m = SHOP_ITEM_RE.match(stripped)
+        if item_m:
+            if pending_item:
+                receipt['items'].append(pending_item)
+            name = item_m.group(1).strip()
+            qty = int(item_m.group(2))
+            tax = item_m.group(3)
+            unit_price = price_to_float(item_m.group(4))
+            total_price = price_to_float(item_m.group(5))
+            pending_item = {
+                'name': name,
+                'price': total_price,
+                'tax': tax,
+                'quantity': qty,
+                'unit_price': unit_price,
+            }
+        elif pending_item and stripped:
+            # Fortsetzungszeile: Artikelname geht weiter
+            pending_item['name'] += ' ' + stripped
+
+    if pending_item:
+        receipt['items'].append(pending_item)
+
+    if not receipt['date'] or not receipt['items']:
+        return None
+
+    return receipt
+
+
 # ── Datenbank ──────────────────────────────────────────────────────────────────
 
 def init_db(conn: sqlite3.Connection):
@@ -307,6 +392,8 @@ def init_db(conn: sqlite3.Connection):
     for col in ('bonus_earned', 'bonus_balance'):
         if col not in rcols:
             conn.execute(f"ALTER TABLE receipts ADD COLUMN {col} REAL")
+    if 'receipt_type' not in rcols:
+        conn.execute("ALTER TABLE receipts ADD COLUMN receipt_type TEXT DEFAULT 'ebon'")
     icols = [r[1] for r in conn.execute("PRAGMA table_info(items)")]
     if 'category' not in icols:
         conn.execute("ALTER TABLE items ADD COLUMN category TEXT")
@@ -323,21 +410,29 @@ def init_db(conn: sqlite3.Connection):
 
 def insert_receipt(conn: sqlite3.Connection, receipt: dict, source: str):
     try:
+        # Erst prüfen ob bereits vorhanden (NULL-sicherer Check)
+        if receipt['bon_nr'] is None:
+            existing = conn.execute(
+                "SELECT id FROM receipts WHERE date=? AND bon_nr IS NULL AND total=?",
+                (receipt['date'], receipt['total'])
+            ).fetchone()
+        else:
+            existing = conn.execute(
+                "SELECT id FROM receipts WHERE date=? AND bon_nr=? AND total=?",
+                (receipt['date'], receipt['bon_nr'], receipt['total'])
+            ).fetchone()
+        if existing:
+            return existing[0]
         cur = conn.execute(
-            "INSERT OR IGNORE INTO receipts "
-            "(date, time, market_id, bon_nr, total, source, bonus_earned, bonus_balance) "
-            "VALUES (?,?,?,?,?,?,?,?)",
+            "INSERT INTO receipts "
+            "(date, time, market_id, bon_nr, total, source, bonus_earned, bonus_balance, receipt_type) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
             (receipt['date'], receipt['time'], receipt['market_id'], receipt['bon_nr'],
-             receipt['total'], source, receipt.get('bonus_earned'), receipt.get('bonus_balance'))
+             receipt['total'], source, receipt.get('bonus_earned'), receipt.get('bonus_balance'),
+             receipt.get('receipt_type', 'ebon'))
         )
         conn.commit()
-        if cur.lastrowid:
-            return cur.lastrowid
-        row = conn.execute(
-            "SELECT id FROM receipts WHERE date=? AND bon_nr=? AND total=?",
-            (receipt['date'], receipt['bon_nr'], receipt['total'])
-        ).fetchone()
-        return row[0] if row else None
+        return cur.lastrowid
     except sqlite3.Error as e:
         print(f"  DB-Fehler Beleg: {e}")
         return None
@@ -362,9 +457,25 @@ def insert_items(conn: sqlite3.Connection, receipt_id: int, items: list):
 
 # ── EML verarbeiten ────────────────────────────────────────────────────────────
 
+def _decode_subject(msg) -> str:
+    """Dekodiert den Subject-Header einer E-Mail."""
+    from email.header import decode_header
+    raw = msg.get('Subject', '')
+    parts = []
+    for part, enc in decode_header(raw):
+        if isinstance(part, bytes):
+            parts.append(part.decode(enc or 'utf-8', errors='replace'))
+        else:
+            parts.append(part)
+    return ''.join(parts)
+
+
 def process_eml(path: Path, conn: sqlite3.Connection) -> bool:
     with open(path, 'rb') as f:
         msg = email.message_from_bytes(f.read())
+
+    subject = _decode_subject(msg)
+    is_shop = bool(re.search(r'Rechnung zu B-', subject))
 
     for part in msg.walk():
         fname = part.get_filename() or ''
@@ -380,7 +491,7 @@ def process_eml(path: Path, conn: sqlite3.Connection) -> bool:
             print(f"  PDF-Fehler in {path.name}: {e}")
             return False
 
-        receipt = parse_receipt(text)
+        receipt = parse_shop_receipt(text) if is_shop else parse_receipt(text)
         if not receipt:
             print(f"  Konnte Beleg nicht parsen: {path.name}")
             return False
@@ -437,7 +548,8 @@ def process_pdf_direct(path: Path, conn: sqlite3.Connection) -> bool:
         print(f"  PDF-Fehler in {path.name}: {e}")
         return False
 
-    receipt = parse_receipt(text)
+    is_shop = 'Bestellnummer:' in text
+    receipt = parse_shop_receipt(text) if is_shop else parse_receipt(text)
     if not receipt or not receipt.get('date') or not receipt.get('total'):
         print(f"  Konnte Beleg nicht parsen: {path.name}")
         return False
@@ -571,6 +683,37 @@ def generate_report(conn: sqlite3.Connection):
     all_item_names = conn.execute("""
         SELECT name, COUNT(*) as cnt FROM items GROUP BY name ORDER BY cnt DESC
     """).fetchall()
+
+    # Gruppen-Vorschläge: Items mit gleichem erstem signifikantem Wort clustern
+    import re as _re
+    _SKIP_WORDS = {'BIO', 'TK', 'H', 'DEMETER', 'ORG', 'EKO', 'EK', 'GR', 'KL', 'VAN'}
+    def _first_kw(name):
+        clean = _re.sub(r'^\d+\s*', '', name.strip())
+        for w in clean.split():
+            w2 = _re.sub(r'[^A-ZÄÖÜ]', '', w.upper())
+            if len(w2) >= 3 and w2 not in _SKIP_WORDS:
+                return w2
+        return clean.split()[0].upper() if clean.split() else name
+
+    _names_cnt = {n: c for n, c in all_item_names}
+    _word_buckets = defaultdict(list)
+    for _sn in _names_cnt:
+        if _sn not in _grp_map and _sn not in _groups:  # noch ungruppiert
+            _word_buckets[_first_kw(_sn)].append(_sn)
+
+    _grp_suggestions = []
+    for _sw, _snames in _word_buckets.items():
+        if len(_snames) < 2:
+            continue
+        _stotal = sum(_names_cnt[n] for n in _snames)
+        if _stotal < 3:
+            continue
+        _grp_suggestions.append({
+            'canon': _sw.capitalize(),
+            'items': sorted(_snames, key=lambda n: -_names_cnt[n]),
+            'total': _stotal,
+        })
+    _grp_suggestions.sort(key=lambda x: x['total'], reverse=True)
 
     # Preisentwicklung: alle Artikel, alle Monate
     price_raw = conn.execute("""
@@ -832,6 +975,7 @@ def generate_report(conn: sqlite3.Connection):
     ], key=lambda x: x['stk_year'], reverse=True)[:60]
 
     # Wiederbestellungs-Prognose
+    import statistics as _stats
     _rd_rows = conn.execute("""
         SELECT i.name, r.date FROM items i
         JOIN receipts r ON i.receipt_id=r.id
@@ -845,7 +989,7 @@ def generate_report(conn: sqlite3.Connection):
     reorder = []
     for _rn, _rdates in _rd_map.items():
         _uniq = sorted(set(_rdates))
-        if len(_uniq) < 2:
+        if len(_uniq) < 3:
             continue
         _intervals = [
             (datetime.strptime(_uniq[i], '%Y-%m-%d').date()
@@ -856,6 +1000,16 @@ def generate_report(conn: sqlite3.Connection):
         _last_d = datetime.strptime(_uniq[-1], '%Y-%m-%d').date()
         _pred_d = _last_d + _td(days=_avg_iv)
         _days_until = (_pred_d - _today_d).days
+
+        # Konfidenz: Variationskoeffizient der Kaufabstände
+        _cv = (_stats.stdev([float(x) for x in _intervals]) / _avg_iv
+               if len(_intervals) >= 2 and _avg_iv > 0 else 1.0)
+        _conf = 3 if _cv < 0.3 else 2 if _cv < 0.6 else 1
+
+        # Saisonalität: Käufe konzentrieren sich auf ≤ 3 Monate im Jahr
+        _buy_months = set(datetime.strptime(d, '%Y-%m-%d').month for d in _uniq)
+        _seasonal = len(_buy_months) <= 3
+
         reorder.append({
             'n': _rn,
             'last': _uniq[-1],
@@ -863,6 +1017,9 @@ def generate_report(conn: sqlite3.Connection):
             'predicted': _pred_d.strftime('%Y-%m-%d'),
             'days': _days_until,
             'purchases': len(_uniq),
+            'conf': _conf,
+            'seasonal': _seasonal,
+            'plausible': _avg_iv <= 180,
         })
     reorder.sort(key=lambda x: x['days'])
 
@@ -951,6 +1108,7 @@ def generate_report(conn: sqlite3.Connection):
     seasonal_data_js   = json.dumps({s: [_seas_map[s].get(c, 0) for c in _seas_cats] for s in _seasons_ord})
     price_alarm_js     = json.dumps(price_alarm, ensure_ascii=False)
     price_vol_js       = json.dumps(_price_vol, ensure_ascii=False)
+    suggestions_js     = json.dumps(_grp_suggestions, ensure_ascii=False)
     forecast_js        = json.dumps({
         'month': _curr_month, 'spent': _curr_spending, 'forecast': _forecast,
         'hist_avg': float(_hist_avg_row), 'vs_avg': _vs_avg,
@@ -1362,7 +1520,8 @@ footer{{text-align:center;padding:2rem;color:#aaa;font-size:.78rem}}
   <section>
     <h2>Wiederbestellungs-Prognose</h2>
     <div style="display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:.8rem;align-items:center">
-      <button class="ctrl-btn ro-active" onclick="filterReorder('all',this)">Alle</button>
+      <button class="ctrl-btn" onclick="filterReorder('all',this)">Alle</button>
+      <button class="ctrl-btn ro-active" onclick="filterReorder('plausible',this)">Plausibel</button>
       <button class="ctrl-btn" onclick="filterReorder('soon',this)">&#9200; Bald (14 Tage)</button>
       <button class="ctrl-btn" onclick="filterReorder('due',this)">&#9888; Überfällig</button>
       <input type="search" id="ro-search" placeholder="Artikel filtern…"
@@ -1378,6 +1537,7 @@ footer{{text-align:center;padding:2rem;color:#aaa;font-size:.78rem}}
         <th class="sortable num" data-key="predicted" onclick="sortReorder(this)">Voraussichtlich</th>
         <th class="sortable sort-asc num" data-key="days" onclick="sortReorder(this)">Tage</th>
         <th class="sortable num" data-key="purchases" onclick="sortReorder(this)">Käufe</th>
+        <th class="sortable num" data-key="conf" onclick="sortReorder(this)">Konfidenz</th>
       </tr></thead>
       <tbody id="ro-body"></tbody>
     </table>
@@ -1441,6 +1601,14 @@ footer{{text-align:center;padding:2rem;color:#aaa;font-size:.78rem}}
       </button>
     </div>
     <div id="grp-summary" style="font-size:.82rem;color:#888;margin-bottom:.6rem"></div>
+
+    <details id="grp-suggestions-wrap" style="margin-bottom:1rem;border:1px solid #e9c46a;border-radius:8px;padding:.6rem .9rem;background:#fffdf0">
+      <summary style="cursor:pointer;font-weight:600;color:#b8860b">
+        Vorschläge <span id="sugg-count"></span>
+      </summary>
+      <div id="grp-suggestions" style="margin-top:.7rem;display:flex;flex-wrap:wrap;gap:.5rem"></div>
+    </details>
+
     <div class="scroll" style="max-height:600px">
     <table id="grp-table">
       <thead><tr>
@@ -1511,6 +1679,7 @@ const SEASONAL_CATS   = {seasonal_cats_js};
 const SEASONAL_DATA   = {seasonal_data_js};
 const PRICE_ALARM     = {price_alarm_js};
 const PRICE_VOL       = {price_vol_js};
+const SUGGESTIONS     = {suggestions_js};
 const FORECAST        = {forecast_js};
 
 // ── Navigation ─────────────────────────────────────────────────────────────
@@ -2042,6 +2211,15 @@ function _initGrpAssign() {{
   }}
 }}
 
+function _updateRowStyle(input) {{
+  const isGrp = !!input.value.trim();
+  const tr = input.closest('tr');
+  tr.style.cssText = isGrp ? 'background:#fffdf0;border-left:3px solid #e9c46a' : '';
+  input.style.cssText = isGrp
+    ? 'width:100%;padding:.3rem .5rem;border:1px solid #e9c46a;border-radius:4px;font-size:.85rem;background:#fffdf0;font-weight:600'
+    : 'width:100%;padding:.3rem .5rem;border:1px solid #ddd;border-radius:4px;font-size:.85rem';
+}}
+
 function renderGruppen(names) {{
   const body = document.getElementById('grp-body');
   body.innerHTML = names.map(([name, cat]) => {{
@@ -2057,7 +2235,7 @@ function renderGruppen(names) {{
       <td><span class="badge">${{cat}}</span></td>
       <td><input type="text" value="${{val}}" data-name="${{esc}}"
            placeholder="Gruppenname…"
-           oninput="_grpAssign[this.dataset.name]=this.value.trim(); updateGrpSummary(); renderGruppen(_ALL_NAMES.filter(([n])=>{{const q=(document.getElementById('grp-search')?.value||'').toLowerCase();return !q||n.toLowerCase().includes(q);}}));"
+           oninput="_grpAssign[this.dataset.name]=this.value.trim(); updateGrpSummary(); _updateRowStyle(this);"
            style="${{inputStyle}}"></td>
     </tr>`;
   }}).join('');
@@ -2114,9 +2292,65 @@ function saveGroups() {{
   }});
 }}
 
+let _pendingSuggestions = SUGGESTIONS.slice();
+
+function _renderSuggestions() {{
+  const wrap = document.getElementById('grp-suggestions');
+  const visible = _pendingSuggestions;
+  document.getElementById('sugg-count').textContent =
+    visible.length ? '(' + visible.length + ')' : '(keine offenen)';
+  wrap.innerHTML = visible.map((s, i) => {{
+    const itemList = s.items.map((n, j) =>
+      `<span style="background:#eee;border-radius:3px;padding:.1rem .3rem;font-size:.78rem;display:inline-flex;align-items:center;gap:.2rem">
+        ${{n}}<button onclick="_removeSuggItem(${{i}},${{j}})" style="background:none;border:none;cursor:pointer;color:#999;font-size:.75rem;padding:0;line-height:1">✕</button>
+      </span>`).join(' ');
+    return `<div style="background:#fff;border:1px solid #e9c46a;border-radius:7px;padding:.55rem .75rem;min-width:220px;max-width:340px">
+      <div style="font-weight:600;margin-bottom:.3rem;color:#333">
+        ${{s.canon}}
+        <span style="font-size:.75rem;color:#888;font-weight:400">(${{s.total}}×)</span>
+      </div>
+      <div style="margin-bottom:.5rem;display:flex;flex-wrap:wrap;gap:.2rem">${{itemList}}</div>
+      <div style="display:flex;gap:.4rem">
+        <button onclick="_acceptSuggestion(${{i}})"
+          style="flex:1;background:#2a9d8f;color:#fff;border:none;border-radius:5px;padding:.3rem .5rem;cursor:pointer;font-size:.82rem">
+          Übernehmen
+        </button>
+        <button onclick="_dismissSuggestion(${{i}})"
+          style="background:#eee;border:none;border-radius:5px;padding:.3rem .5rem;cursor:pointer;font-size:.82rem">
+          ✕
+        </button>
+      </div>
+    </div>`;
+  }}).join('');
+}}
+
+function _removeSuggItem(i, j) {{
+  _pendingSuggestions[i].items.splice(j, 1);
+  if (_pendingSuggestions[i].items.length < 2) _pendingSuggestions.splice(i, 1);
+  _renderSuggestions();
+}}
+
+function _acceptSuggestion(i) {{
+  const s = _pendingSuggestions[i];
+  s.items.forEach(name => {{ _grpAssign[name] = s.canon; }});
+  _pendingSuggestions.splice(i, 1);
+  _renderSuggestions();
+  updateGrpSummary();
+  renderGruppen(_ALL_NAMES.filter(([n]) => {{
+    const q = (document.getElementById('grp-search')?.value || '').toLowerCase();
+    return !q || n.toLowerCase().includes(q);
+  }}));
+}}
+
+function _dismissSuggestion(i) {{
+  _pendingSuggestions.splice(i, 1);
+  _renderSuggestions();
+}}
+
 function initGruppen() {{
   window._gruppenInit = true;
   _initGrpAssign();
+  _renderSuggestions();
   renderGruppen(_ALL_NAMES);
   updateGrpSummary();
   alignHeaders('grp-table');
@@ -2140,13 +2374,22 @@ function renderReorder(data) {{
     const daysStr = r.days < 0
       ? `<span style="color:#cc0000;font-weight:600">${{r.days}} Tage</span>`
       : `<span style="color:${{col}};font-weight:600">+${{r.days}} Tage</span>`;
+    const confDots = r.conf === 3
+      ? '<span title="Hohe Konfidenz – regelmäßiger Rhythmus" style="color:#2a9d8f">●●●</span>'
+      : r.conf === 2
+      ? '<span title="Mittlere Konfidenz – leicht unregelmäßig" style="color:#e9c46a">●●<span style="color:#ddd">●</span></span>'
+      : '<span title="Niedrige Konfidenz – unregelmäßige Kaufabstände" style="color:#e63946">●<span style="color:#ddd">●●</span></span>';
+    const seasonBadge = r.seasonal
+      ? ' <span style="font-size:.7rem;background:#e9c46a33;color:#b8860b;border-radius:3px;padding:.1rem .3rem" title="Saisonaler Artikel">Saisonal</span>'
+      : '';
     return `<tr>
-      <td>${{r.n}}</td>
+      <td>${{r.n}}${{seasonBadge}}</td>
       <td class="num">${{isoDE(r.last)}}</td>
       <td class="num">${{r.interval}} Tage</td>
       <td class="num">${{isoDE(r.predicted)}}</td>
       <td class="num">${{daysStr}}</td>
       <td class="num">${{r.purchases}}</td>
+      <td class="num">${{confDots}}</td>
     </tr>`;
   }}).join('');
 }}
@@ -2167,6 +2410,7 @@ function filterReorder(mode, btn) {{
   }}
   const q = (document.getElementById('ro-search')?.value || '').toLowerCase();
   let data = REORDER;
+  if (_roMode === 'plausible') data = data.filter(r => r.plausible);
   if (_roMode === 'soon') data = data.filter(r => r.days >= 0 && r.days <= 14);
   if (_roMode === 'due')  data = data.filter(r => r.days < 0);
   if (q) data = data.filter(r => r.n.toLowerCase().includes(q));
@@ -2230,7 +2474,7 @@ function sortStk(th) {{
 
 function initVerbrauch() {{
   window._verbrauchInit = true;
-  filterReorder('all', document.querySelector('.ro-active'));
+  filterReorder('plausible', document.querySelector('.ro-active'));
   _applyKg();
   _applyStk();
   alignHeaders('ro-table');
