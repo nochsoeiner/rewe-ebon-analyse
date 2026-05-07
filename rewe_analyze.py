@@ -2701,9 +2701,7 @@ function toggleStkGroup(name, row) {{
   const cell = document.createElement('td');
   cell.colSpan = 4;
   cell.style.padding = '0';
-  cell.innerHTML = '<table style="width:100%;font-size:.85rem"><thead><tr>'
-    + '<th>Artikel</th><th class="num">Stk/Jahr</th><th class="num">H\u00e4lt \u00f8</th><th class="num">Gesamt</th>'
-    + '</tr></thead><tbody>' + itemRows + '</tbody></table>';
+  cell.innerHTML = '<table style="width:100%;font-size:.85rem"><tbody>' + itemRows + '</tbody></table>';
   expand.appendChild(cell);
   row.after(expand);
   if (toggle) toggle.textContent = '\u25bc';
