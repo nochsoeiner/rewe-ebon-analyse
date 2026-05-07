@@ -1031,6 +1031,31 @@ def generate_report(conn: sqlite3.Connection):
         for n, d in _cons.items() if not d['is_weight'] and d['stk'] > 1
     ], key=lambda x: x['stk_year'], reverse=True)[:60]
 
+    # Detail-Daten für Gruppen-Expand (ungrouped, per original name)
+    _cons_raw = {}
+    for _cn, _cp, _cu, _cq, _cc, _crid in _cons_rows:
+        if _cn not in _cons_raw:
+            _cons_raw[_cn] = {'stk': 0, 'is_weight': False, 'cat': _cc}
+        if _cq == 1 and abs(_cu - _cp) > 0.01:
+            _cons_raw[_cn]['is_weight'] = True
+        else:
+            _cons_raw[_cn]['stk'] += _cq
+    _stk_detail = {}
+    for _gname, _aliases in _groups.items():
+        _items = []
+        for _alias in _aliases:
+            _d = _cons_raw.get(_alias)
+            if _d and not _d['is_weight'] and _d['stk'] > 0:
+                _items.append({
+                    'n': _alias,
+                    'stk_total': _d['stk'],
+                    'stk_year':  round(_d['stk'] / _years, 1),
+                    'days_per':  round(_date_span / _d['stk'], 1) if _d['stk'] > 0 else None,
+                })
+        if _items:
+            _stk_detail[_gname] = sorted(_items, key=lambda x: x['stk_year'], reverse=True)
+    stk_detail_js = json.dumps(_stk_detail, ensure_ascii=False)
+
     # Haltbarkeit & Wochenverbrauch (Stück + Gewicht vereint)
     consumption_lifespan = []
     for _cln, _cld in _cons.items():
@@ -1804,6 +1829,7 @@ const INFLATION       = {inflation_js};
 const GROUPS          = {groups_js};
 const CONSUMPTION_KG       = {consumption_kg_js};
 const CONSUMPTION_STK      = {consumption_stk_js};
+const STK_DETAIL           = {stk_detail_js};
 const CONSUMPTION_LIFESPAN = {consumption_lifespan_js};
 const REORDER         = {reorder_js};
 const BASKET          = {basket_js};
@@ -2621,17 +2647,23 @@ function _applyStk() {{
   const {{key, dir}} = _stkSort;
   data = data.slice().sort((a,b) => (a[key]<b[key]?-dir:a[key]>b[key]?dir:0));
   const _stkGrpNames = new Set(Object.keys(GROUPS));
-  document.getElementById('stk-body').innerHTML = data.map(r => {{
-    const isGrp = _stkGrpNames.has(r.n);
-    const grpMark = isGrp ? ' <span style="font-size:.7rem;background:#e9c46a33;color:#b8860b;border-radius:3px;padding:.1rem .3rem">Gruppe</span>' : '';
-    const rowBg = isGrp ? 'background:#fffdf0' : '';
+  const rows = data.map(r => {{
+    const isGrp = _stkGrpNames.has(r.n) && STK_DETAIL[r.n];
+    const hasGrpStyle = _stkGrpNames.has(r.n);
+    const grpMark = hasGrpStyle ? ' <span style="font-size:.7rem;background:#e9c46a33;color:#b8860b;border-radius:3px;padding:.1rem .3rem">Gruppe</span>' : '';
+    const rowBg = hasGrpStyle ? 'background:#fffdf0' : '';
     const daysStr = r.days_per != null ? r.days_per.toFixed(1).replace('.',',') + ' Tage' : '–';
-    return `<tr style="${{rowBg}}">
-      <td>${{r.n}}${{grpMark}}<br><span class="badge">${{r.cat}}</span></td>
-      <td class="num"><strong>${{r.stk_year.toFixed(1).replace('.',',')}} Stk</strong></td>
-      <td class="num" style="color:#457b9d">${{daysStr}}</td>
-      <td class="num" style="color:#888">${{r.stk_total}} Stk</td></tr>`;
-  }}).join('');
+    const toggle = isGrp ? '<span class="stk-toggle" style="color:#cc0000;margin-right:.3rem">▶</span>' : '<span style="display:inline-block;width:1rem;margin-right:.3rem"></span>';
+    const nm = r.n.replace(/'/g, '');
+    const onclick = isGrp ? 'onclick="toggleStkGroup("+ JSON.stringify(nm) +",this)"' : '';
+    const cursor = isGrp ? 'cursor:pointer' : '';
+    return '<tr style="' + rowBg + ';' + cursor + '" ' + onclick + '>'
+      + '<td>' + toggle + r.n + grpMark + '<br><span class="badge">' + r.cat + '</span></td>'
+      + '<td class="num"><strong>' + r.stk_year.toFixed(1).replace('.',',') + ' Stk</strong></td>'
+      + '<td class="num" style="color:#457b9d">' + daysStr + '</td>'
+      + '<td class="num" style="color:#888">' + r.stk_total + ' Stk</td></tr>';
+  }});
+  document.getElementById('stk-body').innerHTML = rows.join('');
 }}
 function filterStk() {{ _applyStk(); }}
 function sortStk(th) {{
@@ -2640,6 +2672,39 @@ function sortStk(th) {{
   document.querySelectorAll('#stk-table th').forEach(h=>h.classList.remove('sort-asc','sort-desc'));
   th.classList.add(_stkSort.dir===1?'sort-asc':'sort-desc');
   _applyStk();
+}}
+
+function toggleStkGroup(name, row) {{
+  const next = row.nextElementSibling;
+  const toggle = row.querySelector('.stk-toggle');
+  if (next && next.classList.contains('stk-expand-row')) {{
+    next.remove();
+    if (toggle) toggle.textContent = '▶';
+    return;
+  }}
+  document.querySelectorAll('.stk-expand-row').forEach(r => r.remove());
+  document.querySelectorAll('.stk-toggle').forEach(t => t.textContent = '▶');
+  const items = STK_DETAIL[name] || [];
+  const itemRows = items.map(i => {{
+    const d = i.days_per != null ? i.days_per.toFixed(1).replace('.',',') + ' Tage' : '–';
+    return '<tr>'
+      + '<td style="padding-left:1.5rem">' + i.n + '</td>'
+      + '<td class="num">' + i.stk_year.toFixed(1).replace('.',',') + ' Stk/Jahr</td>'
+      + '<td class="num" style="color:#457b9d">' + d + '</td>'
+      + '<td class="num" style="color:#888">' + i.stk_total + ' Stk</td>'
+      + '</tr>';
+  }}).join('');
+  const expand = document.createElement('tr');
+  expand.className = 'stk-expand-row';
+  const cell = document.createElement('td');
+  cell.colSpan = 4;
+  cell.style.padding = '0';
+  cell.innerHTML = '<table style="width:100%;font-size:.85rem"><thead><tr>'
+    + '<th>Artikel</th><th class="num">Stk/Jahr</th><th class="num">Hält ø</th><th class="num">Gesamt</th>'
+    + '</tr></thead><tbody>' + itemRows + '</tbody></table>';
+  expand.appendChild(cell);
+  row.after(expand);
+  if (toggle) toggle.textContent = '▼';
 }}
 
 let _lifeSort = {{ key: 'days_per', dir: 1 }};
