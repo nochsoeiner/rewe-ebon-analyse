@@ -1300,7 +1300,7 @@ th.sortable{{cursor:pointer}}
 th.sortable:hover{{background:#aa0000}}
 th.sort-asc::after{{content:' ▲';font-size:.7em}}
 th.sort-desc::after{{content:' ▼';font-size:.7em}}
-.num{{text-align:right}}
+.num{{text-align:right;white-space:nowrap}}
 td{{padding:.45rem .8rem;border-bottom:1px solid #eee}}
 tr:hover td{{background:#fff5f5}}
 .expand-row td{{background:#fafafa;padding:.3rem .8rem .8rem 2rem;border-bottom:2px solid #eee}}
