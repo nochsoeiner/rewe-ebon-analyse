@@ -1317,7 +1317,7 @@ input[type=text],input[type=search]{{width:100%;padding:.5rem .8rem;border:1px s
 input:focus{{outline:2px solid #cc000066;border-color:#cc0000}}
 .scroll{{max-height:420px;overflow-y:auto;scrollbar-width:none;-ms-overflow-style:none}}
 .scroll::-webkit-scrollbar{{display:none}}
-.scroll thead th{{position:sticky;top:0;background:#fff;z-index:1;box-shadow:0 1px 0 #ddd}}
+.scroll thead th{{position:sticky;top:0;z-index:1;box-shadow:0 2px 0 #aa0000}}
 .badge{{display:inline-block;background:#cc000015;color:#cc0000;border-radius:4px;
         padding:.1rem .45rem;font-size:.78rem;font-weight:600}}
 #trend-picker{{display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:1rem;
