@@ -730,6 +730,18 @@ def generate_report(conn: sqlite3.Connection):
         price_months.add(month)
     price_months = sorted(price_months)
 
+    # Letzter Kaufpreis pro Artikel
+    _last_price_raw = conn.execute("""
+        SELECT i.name, i.unit_price
+        FROM items i JOIN receipts r ON i.receipt_id=r.id
+        WHERE i.unit_price > 0
+        ORDER BY i.name, r.date DESC, i.id DESC
+    """).fetchall()
+    _last_price_map = {}
+    for _lpn, _lpp in _last_price_raw:
+        if _lpn not in _last_price_map:
+            _last_price_map[_lpn] = _lpp
+
     # Preisschwankung pro Artikel
     _buys_map = {n: c for n, c in all_item_names}
     _price_vol = []
@@ -739,9 +751,11 @@ def generate_report(conn: sqlite3.Connection):
             continue
         _mn, _mx, _avg = min(_pvp), max(_pvp), sum(_pvp) / len(_pvp)
         _swing = round((_mx - _mn) / _avg * 100, 1) if _avg > 0 else 0
+        _last = _last_price_map.get(_pvn)
         _price_vol.append({'n': _pvn, 'min': round(_mn, 2), 'max': round(_mx, 2),
                            'avg': round(_avg, 2), 'swing': _swing, 'cnt': len(_pvp),
-                           'buys': _buys_map.get(_pvn, 0)})
+                           'buys': _buys_map.get(_pvn, 0),
+                           'last': round(_last, 2) if _last else None})
     _price_vol.sort(key=lambda x: x['swing'], reverse=True)
 
     # Top-Artikel: alle Namen aggregieren, dann Gruppen anwenden
@@ -984,16 +998,17 @@ def generate_report(conn: sqlite3.Connection):
 
     _cons_rows = conn.execute("""
         SELECT i.name, i.price, i.unit_price, i.quantity,
-               COALESCE(i.category,'Sonstiges')
+               COALESCE(i.category,'Sonstiges'), r.id
         FROM items i JOIN receipts r ON i.receipt_id=r.id
         WHERE i.price > 0 AND i.unit_price > 0
     """).fetchall()
 
     _cons = {}
-    for _cn, _cp, _cu, _cq, _cc in _cons_rows:
+    for _cn, _cp, _cu, _cq, _cc, _crid in _cons_rows:
         _key = _grp(_cn)   # ggf. Gruppenname
         if _key not in _cons:
-            _cons[_key] = {'kg': 0.0, 'stk': 0, 'is_weight': False, 'cat': _cc}
+            _cons[_key] = {'kg': 0.0, 'stk': 0, 'is_weight': False, 'cat': _cc, 'receipts': set()}
+        _cons[_key]['receipts'].add(_crid)
         if _cq == 1 and abs(_cu - _cp) > 0.01:
             # Gewichtsartikel: kg = Preis / EUR/kg
             _cons[_key]['is_weight'] = True
@@ -1015,6 +1030,26 @@ def generate_report(conn: sqlite3.Connection):
          'days_per':  round(_date_span / d['stk'], 1) if d['stk'] > 0 else None}
         for n, d in _cons.items() if not d['is_weight'] and d['stk'] > 1
     ], key=lambda x: x['stk_year'], reverse=True)[:60]
+
+    # Haltbarkeit & Wochenverbrauch (Stück + Gewicht vereint)
+    consumption_lifespan = []
+    for _cln, _cld in _cons.items():
+        if _cld['is_weight'] and _cld['kg'] > 0.05:
+            _amount, _unit = _cld['kg'], 'kg'
+        elif (not _cld['is_weight']) and _cld['stk'] > 1:
+            _amount, _unit = float(_cld['stk']), 'Stk'
+        else:
+            continue
+        _dpu = _date_span / _amount if _amount > 0 else None
+        _pwk = _amount * 7 / _date_span if _date_span else None
+        consumption_lifespan.append({
+            'n': _cln, 'cat': _cld['cat'], 'unit': _unit,
+            'amount':   round(_amount, 2),
+            'days_per': round(_dpu, 1) if _dpu else None,
+            'per_week': round(_pwk, 2) if _pwk else None,
+            'buys':     len(_cld['receipts']),
+        })
+    consumption_lifespan.sort(key=lambda x: (x['days_per'] is None, x['days_per'] or 0))
 
     # Wiederbestellungs-Prognose
     import statistics as _stats
@@ -1142,8 +1177,9 @@ def generate_report(conn: sqlite3.Connection):
     bonus_avg_pct      = bonus_total[2] or 0
 
     groups_js          = json.dumps(_groups,          ensure_ascii=False)
-    consumption_kg_js  = json.dumps(consumption_kg,  ensure_ascii=False)
-    consumption_stk_js = json.dumps(consumption_stk, ensure_ascii=False)
+    consumption_kg_js       = json.dumps(consumption_kg,       ensure_ascii=False)
+    consumption_stk_js      = json.dumps(consumption_stk,      ensure_ascii=False)
+    consumption_lifespan_js = json.dumps(consumption_lifespan, ensure_ascii=False)
     reorder_js         = json.dumps(reorder,          ensure_ascii=False)
     basket_js          = json.dumps(basket_pairs, ensure_ascii=False)
     seasonal_cats_js   = json.dumps(_seas_cats)
@@ -1399,6 +1435,7 @@ footer{{text-align:center;padding:2rem;color:#aaa;font-size:.78rem}}
           <th class="sortable" onclick="sortTable(this)">Artikel</th>
           <th class="sortable num" onclick="sortTable(this)">Min</th>
           <th class="sortable num" onclick="sortTable(this)">Max</th>
+          <th class="sortable num" onclick="sortTable(this)">Zuletzt</th>
           <th class="sortable num" onclick="sortTable(this)">Käufe</th>
           <th class="sortable num" onclick="sortTable(this)">Schwankung</th>
         </tr></thead>
@@ -1588,6 +1625,29 @@ footer{{text-align:center;padding:2rem;color:#aaa;font-size:.78rem}}
 <div class="container">
 
   <section>
+    <h2>Haltbarkeit &amp; Wochenverbrauch
+      <span style="font-size:.82rem;font-weight:400;color:#888">– wie lange hält 1 Einheit, was geht pro Woche durch</span>
+    </h2>
+    <div style="display:flex;gap:.5rem;align-items:center;margin-bottom:.8rem;flex-wrap:wrap">
+      <input type="search" id="life-search" placeholder="Artikel filtern…" oninput="renderLifespan()" style="flex:1;min-width:160px;margin:0">
+      <span id="life-count" style="font-size:.82rem;color:#888;margin-left:auto"></span>
+    </div>
+    <div class="scroll" style="max-height:520px">
+    <table id="life-table">
+      <thead><tr>
+        <th class="sortable" data-key="n" onclick="sortLifespan(this)">Artikel</th>
+        <th class="sortable" data-key="unit" onclick="sortLifespan(this)">Einheit</th>
+        <th class="sortable sort-asc num" data-key="days_per" onclick="sortLifespan(this)">Hält Ø</th>
+        <th class="sortable num" data-key="per_week" onclick="sortLifespan(this)">Pro Woche</th>
+        <th class="sortable num" data-key="buys" onclick="sortLifespan(this)">Käufe</th>
+        <th class="sortable num" data-key="amount" onclick="sortLifespan(this)">Gesamt</th>
+      </tr></thead>
+      <tbody id="life-body"></tbody>
+    </table>
+    </div>
+  </section>
+
+  <section>
     <h2>Wiederbestellungs-Prognose</h2>
     <div style="display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:.8rem;align-items:center">
       <button class="ctrl-btn" onclick="filterReorder('all',this)">Alle</button>
@@ -1741,8 +1801,9 @@ const BONUS_BALANCE   = {bonus_balance_js};
 const BONUS_PCT       = {bonus_pct_js};
 const INFLATION       = {inflation_js};
 const GROUPS          = {groups_js};
-const CONSUMPTION_KG  = {consumption_kg_js};
-const CONSUMPTION_STK = {consumption_stk_js};
+const CONSUMPTION_KG       = {consumption_kg_js};
+const CONSUMPTION_STK      = {consumption_stk_js};
+const CONSUMPTION_LIFESPAN = {consumption_lifespan_js};
 const REORDER         = {reorder_js};
 const BASKET          = {basket_js};
 const SEASONAL_CATS   = {seasonal_cats_js};
@@ -1992,15 +2053,18 @@ function initTrends() {{
   // Volatilität-Tabellen befüllen
   const top = PRICE_VOL.slice(0, 20);
   const stable = PRICE_VOL.slice().reverse().slice(0, 20);
-  document.getElementById('vol-high-body').innerHTML = top.map(r =>
-    `<tr style="cursor:pointer" onclick="selectSingleItem('${{r.n.replace(/'/g,"\\'")}}')">
-      <td>${{r.n}}<br><small style="color:#888">${{r.cnt}} Monate</small></td>
-      <td class="num">${{r.min.toFixed(2).replace('.',',')}} €</td>
-      <td class="num">${{r.max.toFixed(2).replace('.',',')}} €</td>
-      <td class="num">${{r.buys}}×</td>
-      <td class="num" style="color:#e63946;font-weight:600">± ${{r.swing.toFixed(1).replace('.',',')}} %</td>
-    </tr>`
-  ).join('');
+  document.getElementById('vol-high-body').innerHTML = top.map(r => {{
+    const lastStr = r.last != null ? r.last.toFixed(2).replace('.',',') + ' €' : '–';
+    const lastColor = r.last == null ? '' : r.last > r.avg ? 'color:#e63946' : r.last < r.avg ? 'color:#2a9d8f' : '';
+    return '<tr style="cursor:pointer" onclick="selectSingleItem(\'' + r.n.replace(/'/g,"\\'") + '\')">'
+      + '<td>' + r.n + '<br><small style="color:#888">' + r.cnt + ' Monate</small></td>'
+      + '<td class="num">' + r.min.toFixed(2).replace('.',',') + ' €</td>'
+      + '<td class="num">' + r.max.toFixed(2).replace('.',',') + ' €</td>'
+      + '<td class="num" style="' + lastColor + ';font-weight:600">' + lastStr + '</td>'
+      + '<td class="num">' + r.buys + '×</td>'
+      + '<td class="num" style="color:#e63946;font-weight:600">± ' + r.swing.toFixed(1).replace('.',',') + ' %</td>'
+      + '</tr>';
+  }}).join('');
   document.getElementById('vol-low-body').innerHTML = stable.map(r =>
     `<tr style="cursor:pointer" onclick="selectSingleItem('${{r.n.replace(/'/g,"\\'")}}')">
       <td>${{r.n}}</td>
@@ -2576,14 +2640,62 @@ function sortStk(th) {{
   _applyStk();
 }}
 
+let _lifeSort = {{ key: 'days_per', dir: 1 }};
+function renderLifespan() {{
+  const q = (document.getElementById('life-search')?.value || '').toLowerCase();
+  let data = q ? CONSUMPTION_LIFESPAN.filter(r => r.n.toLowerCase().includes(q))
+                : CONSUMPTION_LIFESPAN.slice();
+  const {{key, dir}} = _lifeSort;
+  data.sort((a,b) => {{
+    const av = a[key], bv = b[key];
+    if (av == null && bv == null) return 0;
+    if (av == null) return 1;
+    if (bv == null) return -1;
+    return av < bv ? -dir : av > bv ? dir : 0;
+  }});
+  const _lifeGrpNames = new Set(Object.keys(GROUPS));
+  document.getElementById('life-body').innerHTML = data.map(r => {{
+    const isGrp = _lifeGrpNames.has(r.n);
+    const grpMark = isGrp ? ' <span style="font-size:.7rem;background:#e9c46a33;color:#b8860b;border-radius:3px;padding:.1rem .3rem">Gruppe</span>' : '';
+    const rowBg = isGrp ? 'background:#fffdf0' : '';
+    const daysStr = r.days_per != null ? r.days_per.toFixed(1).replace('.',',') + ' Tage' : '–';
+    const pwAmt = r.per_week != null
+      ? (r.unit === 'kg' ? r.per_week.toFixed(2).replace('.',',') : r.per_week.toFixed(2).replace('.',','))
+      : '–';
+    const pwStr = r.per_week != null ? pwAmt + ' ' + r.unit : '–';
+    const totStr = r.unit === 'kg'
+      ? r.amount.toFixed(2).replace('.',',') + ' kg'
+      : Math.round(r.amount) + ' Stk';
+    return '<tr style="' + rowBg + '">'
+      + '<td>' + r.n + grpMark + '<br><span class="badge">' + r.cat + '</span></td>'
+      + '<td>1 ' + r.unit + '</td>'
+      + '<td class="num" style="color:#457b9d;font-weight:600">' + daysStr + '</td>'
+      + '<td class="num"><strong>' + pwStr + '</strong></td>'
+      + '<td class="num">' + r.buys + '×</td>'
+      + '<td class="num" style="color:#888">' + totStr + '</td>'
+      + '</tr>';
+  }}).join('');
+  const cnt = document.getElementById('life-count');
+  if (cnt) cnt.textContent = data.length + ' Artikel';
+}}
+function sortLifespan(th) {{
+  const key = th.dataset.key;
+  _lifeSort = _lifeSort.key===key ? {{key,dir:_lifeSort.dir*-1}} : {{key,dir:-1}};
+  document.querySelectorAll('#life-table th').forEach(h=>h.classList.remove('sort-asc','sort-desc'));
+  th.classList.add(_lifeSort.dir===1?'sort-asc':'sort-desc');
+  renderLifespan();
+}}
+
 function initVerbrauch() {{
   window._verbrauchInit = true;
   filterReorder('plausible', document.querySelector('.ro-active'));
   _applyKg();
   _applyStk();
+  renderLifespan();
   alignHeaders('ro-table');
   alignHeaders('kg-table');
   alignHeaders('stk-table');
+  alignHeaders('life-table');
 }}
 
 // ── Forecast ────────────────────────────────────────────────────────────────
