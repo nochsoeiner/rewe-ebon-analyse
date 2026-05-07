@@ -932,6 +932,48 @@ def generate_report(conn: sqlite3.Connection):
     price_alarm.sort(key=lambda x: x['dev'], reverse=True)
     price_alarm = price_alarm[:30]
 
+    # ── Kürzliche Preissteigerungen ───────────────────────────────────────────
+    # Vergleich: Ø-Preis letzte 90 Tage vs. Ø-Preis 91–455 Tage davor
+    # Nur Produkte, die kürzlich gekauft wurden UND vorher schon regelmäßig
+    from datetime import date as _date
+    _today_str = _date.today().isoformat()
+    _rr_raw = conn.execute("""
+        SELECT i.name, i.unit_price, r.date
+        FROM items i JOIN receipts r ON i.receipt_id=r.id
+        WHERE i.unit_price>0
+          AND r.date >= date(?, '-455 days')
+        ORDER BY i.name, r.date
+    """, (_today_str,)).fetchall()
+    _rr_map = defaultdict(list)
+    for _n, _p, _d in _rr_raw:
+        _rr_map[_n].append((_d, float(_p)))
+    _cutoff_recent = _date.today().isoformat()
+    from datetime import timedelta as _td2
+    _d90  = (_date.today() - _td2(days=90)).isoformat()
+    _d455 = (_date.today() - _td2(days=455)).isoformat()
+    recent_rises = []
+    for _n, _hist in _rr_map.items():
+        _older  = [p for d, p in _hist if d < _d90]
+        _recent = [p for d, p in _hist if d >= _d90]
+        if len(_older) < 2 or len(_recent) < 1:
+            continue
+        _avg_old = sum(_older) / len(_older)
+        _avg_new = sum(_recent) / len(_recent)
+        _pct = (_avg_new - _avg_old) / _avg_old * 100
+        if _pct < 10:
+            continue
+        _last_date = max(d for d, _ in _hist if d >= _d90)
+        recent_rises.append({
+            'n': _n,
+            'avg_old': round(_avg_old, 2),
+            'avg_new': round(_avg_new, 2),
+            'pct': round(_pct, 1),
+            'last_date': _last_date,
+            'cnt_old': len(_older),
+            'cnt_new': len(_recent),
+        })
+    recent_rises.sort(key=lambda x: x['pct'], reverse=True)
+
     # ── Verbrauch & Wiederbestellungs-Prognose ────────────────────────────────
     from datetime import timedelta as _td
 
@@ -1132,8 +1174,11 @@ def generate_report(conn: sqlite3.Connection):
             # \u00a0 (geschütztes Leerzeichen aus feur()) vor dem Match normalisieren
             plain = _re.sub(r'<[^>]+>', '', str(c)).strip().replace('\u00a0', ' ')
             is_num = tag == 'td' and bool(_NUM_RE.match(plain)) and plain not in ('', '–', '-')
-            cls = ' class="num"' if is_num else ''
-            parts.append(f'<{tag}{cls}>{c}</{tag}>')
+            if tag == 'th':
+                parts.append(f'<th class="sortable" onclick="sortTable(this)">{c}</th>')
+            else:
+                cls = ' class="num"' if is_num else ''
+                parts.append(f'<td{cls}>{c}</td>')
         return '<tr>' + ''.join(parts) + '</tr>'
 
     yearly_rows = ''.join(
@@ -1177,6 +1222,13 @@ def generate_report(conn: sqlite3.Connection):
         tr([name, trips, feur(avg_t), feur(sum_t)])
         for name, trips, avg_t, sum_t in weekday_full
     )
+
+    recent_rises_rows = ''.join(
+        tr([r['n'], feur(r['avg_old']), f"<strong>{feur(r['avg_new'])}</strong>",
+            pct_cell(r['pct']), iso_de(r['last_date']), r['cnt_new']])
+        for r in recent_rises
+    )
+    recent_rises_count = len(recent_rises)
 
     html = f"""<!DOCTYPE html>
 <html lang="de">
@@ -1344,11 +1396,11 @@ footer{{text-align:center;padding:2rem;color:#aaa;font-size:.78rem}}
       <div class="scroll" style="max-height:380px">
       <table id="vol-high-table">
         <thead><tr>
-          <th>Artikel</th>
-          <th class="num">Min</th>
-          <th class="num">Max</th>
-          <th class="num">Käufe</th>
-          <th class="num">Schwankung</th>
+          <th class="sortable" onclick="sortTable(this)">Artikel</th>
+          <th class="sortable num" onclick="sortTable(this)">Min</th>
+          <th class="sortable num" onclick="sortTable(this)">Max</th>
+          <th class="sortable num" onclick="sortTable(this)">Käufe</th>
+          <th class="sortable num" onclick="sortTable(this)">Schwankung</th>
         </tr></thead>
         <tbody id="vol-high-body"></tbody>
       </table>
@@ -1359,10 +1411,10 @@ footer{{text-align:center;padding:2rem;color:#aaa;font-size:.78rem}}
       <div class="scroll" style="max-height:380px">
       <table id="vol-low-table">
         <thead><tr>
-          <th>Artikel</th>
-          <th class="num">Preis</th>
-          <th class="num">Käufe</th>
-          <th class="num">Schwankung</th>
+          <th class="sortable" onclick="sortTable(this)">Artikel</th>
+          <th class="sortable num" onclick="sortTable(this)">Preis</th>
+          <th class="sortable num" onclick="sortTable(this)">Käufe</th>
+          <th class="sortable num" onclick="sortTable(this)">Schwankung</th>
         </tr></thead>
         <tbody id="vol-low-body"></tbody>
       </table>
@@ -1413,17 +1465,35 @@ footer{{text-align:center;padding:2rem;color:#aaa;font-size:.78rem}}
   </section>
 
   <section>
+    <h2>Kürzlich gestiegen <span style="font-size:.82rem;font-weight:400;color:#888">– zuletzt gekaufte Artikel, deren Preis in den letzten 90 Tagen um &gt; 10 % gestiegen ist</span></h2>
+    <div style="font-size:.82rem;color:#888;margin-bottom:.5rem">{recent_rises_count} Artikel</div>
+    <div class="scroll" style="max-height:400px">
+    <table>
+      <thead><tr>
+        <th class="sortable" onclick="sortTable(this)">Artikel</th>
+        <th class="sortable num" onclick="sortTable(this)">Preis vorher</th>
+        <th class="sortable num" onclick="sortTable(this)">Preis aktuell</th>
+        <th class="sortable num" onclick="sortTable(this)">Steigerung</th>
+        <th class="sortable num" onclick="sortTable(this)">Letzter Kauf</th>
+        <th class="sortable num" onclick="sortTable(this)">Käufe neu</th>
+      </tr></thead>
+      <tbody>{recent_rises_rows}</tbody>
+    </table>
+    </div>
+  </section>
+
+  <section>
     <h2>Preis-Alarm <span style="font-size:.82rem;font-weight:400;color:#888">– letzter Kauf &gt; 10 % über Ø-Preis</span></h2>
     <div id="alarm-count" style="font-size:.82rem;color:#888;margin-bottom:.5rem"></div>
     <div class="scroll" style="max-height:400px">
     <table id="alarm-table">
       <thead><tr>
-        <th>Artikel</th>
-        <th class="num">Ø Preis</th>
-        <th class="num">Letzter Preis</th>
-        <th class="num">Abweichung</th>
-        <th class="num">Datum</th>
-        <th class="num">Käufe</th>
+        <th class="sortable" onclick="sortTable(this)">Artikel</th>
+        <th class="sortable num" onclick="sortTable(this)">Ø Preis</th>
+        <th class="sortable num" onclick="sortTable(this)">Letzter Preis</th>
+        <th class="sortable num" onclick="sortTable(this)">Abweichung</th>
+        <th class="sortable num" onclick="sortTable(this)">Datum</th>
+        <th class="sortable num" onclick="sortTable(this)">Käufe</th>
       </tr></thead>
       <tbody id="alarm-body"></tbody>
     </table>
@@ -1441,10 +1511,10 @@ footer{{text-align:center;padding:2rem;color:#aaa;font-size:.78rem}}
     <div class="scroll" style="max-height:520px">
     <table id="inf-table">
       <thead><tr>
-        <th>Artikel</th>
-        <th class="num">Erst-Datum</th><th class="num">Erst-Preis</th>
-        <th class="num">Letzt-Datum</th><th class="num">Letzt-Preis</th>
-        <th class="num">Änderung</th><th class="num">Käufe</th>
+        <th class="sortable" onclick="sortTable(this)">Artikel</th>
+        <th class="sortable num" onclick="sortTable(this)">Erst-Datum</th><th class="sortable num" onclick="sortTable(this)">Erst-Preis</th>
+        <th class="sortable num" onclick="sortTable(this)">Letzt-Datum</th><th class="sortable num" onclick="sortTable(this)">Letzt-Preis</th>
+        <th class="sortable num" onclick="sortTable(this)">Änderung</th><th class="sortable num" onclick="sortTable(this)">Käufe</th>
       </tr></thead>
       <tbody id="inf-body"></tbody>
     </table>
@@ -1695,6 +1765,40 @@ function showTab(id) {{
   if (id === 'verbrauch' && !window._verbrauchInit) initVerbrauch();
   if (id === 'gruppen'   && !window._gruppenInit)   initGruppen();
   if (id === 'extras'    && !window._extrasInit) initExtras();
+}}
+
+// ── Universelle Tabellensortierung ──────────────────────────────────────────
+function sortTable(th) {{
+  const table  = th.closest('table');
+  const tbody  = table.querySelector('tbody');
+  if (!tbody) return;
+  const ths    = Array.from(th.closest('tr').querySelectorAll('th'));
+  const col    = ths.indexOf(th);
+  const wasAsc = th.dataset.dir === 'asc';
+  const asc    = !wasAsc;
+
+  ths.forEach(h => {{ delete h.dataset.dir; h.classList.remove('sort-asc','sort-desc'); }});
+  th.dataset.dir = asc ? 'asc' : 'desc';
+  th.classList.add(asc ? 'sort-asc' : 'sort-desc');
+
+  const rows = Array.from(tbody.querySelectorAll('tr'));
+  rows.sort((a, b) => {{
+    const av = (a.cells[col]?.textContent || '').trim();
+    const bv = (b.cells[col]?.textContent || '').trim();
+    // Date DD.MM.YYYY
+    if (/^\d{{2}}\.\d{{2}}\.\d{{4}}$/.test(av) && /^\d{{2}}\.\d{{2}}\.\d{{4}}$/.test(bv)) {{
+      const ad = av.split('.').reverse().join('');
+      const bd = bv.split('.').reverse().join('');
+      return asc ? ad.localeCompare(bd) : bd.localeCompare(ad);
+    }}
+    // Numeric (strip €, %, +, spaces, swap decimal comma)
+    const an = parseFloat(av.replace(/[€\s%+]/g,'').replace(/\./g,'').replace(',','.'));
+    const bn = parseFloat(bv.replace(/[€\s%+]/g,'').replace(/\./g,'').replace(',','.'));
+    if (!isNaN(an) && !isNaN(bn)) return asc ? an - bn : bn - an;
+    // Text
+    return asc ? av.localeCompare(bv,'de') : bv.localeCompare(av,'de');
+  }});
+  rows.forEach(r => tbody.appendChild(r));
 }}
 
 // ── Hilfsfunktionen ─────────────────────────────────────────────────────────
