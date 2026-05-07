@@ -2056,14 +2056,15 @@ function initTrends() {{
   document.getElementById('vol-high-body').innerHTML = top.map(r => {{
     const lastStr = r.last != null ? r.last.toFixed(2).replace('.',',') + ' €' : '–';
     const lastColor = r.last == null ? '' : r.last > r.avg ? 'color:#e63946' : r.last < r.avg ? 'color:#2a9d8f' : '';
-    return '<tr style="cursor:pointer" onclick="selectSingleItem(\'' + r.n.replace(/'/g,"\\'") + '\')">'
-      + '<td>' + r.n + '<br><small style="color:#888">' + r.cnt + ' Monate</small></td>'
-      + '<td class="num">' + r.min.toFixed(2).replace('.',',') + ' €</td>'
-      + '<td class="num">' + r.max.toFixed(2).replace('.',',') + ' €</td>'
-      + '<td class="num" style="' + lastColor + ';font-weight:600">' + lastStr + '</td>'
-      + '<td class="num">' + r.buys + '×</td>'
-      + '<td class="num" style="color:#e63946;font-weight:600">± ' + r.swing.toFixed(1).replace('.',',') + ' %</td>'
-      + '</tr>';
+    const nm = r.n.replace(/'/g, '');
+    return `<tr style="cursor:pointer" onclick="selectSingleItem('${{nm}}')">
+      <td>${{r.n}}<br><small style="color:#888">${{r.cnt}} Monate</small></td>
+      <td class="num">${{r.min.toFixed(2).replace('.',',')}} €</td>
+      <td class="num">${{r.max.toFixed(2).replace('.',',')}} €</td>
+      <td class="num" style="${{lastColor}};font-weight:600">${{lastStr}}</td>
+      <td class="num">${{r.buys}}×</td>
+      <td class="num" style="color:#e63946;font-weight:600">± ${{r.swing.toFixed(1).replace('.',',')}} %</td>
+    </tr>`;
   }}).join('');
   document.getElementById('vol-low-body').innerHTML = stable.map(r =>
     `<tr style="cursor:pointer" onclick="selectSingleItem('${{r.n.replace(/'/g,"\\'")}}')">
