@@ -2653,11 +2653,11 @@ function _applyStk() {{
     const grpMark = hasGrpStyle ? ' <span style="font-size:.7rem;background:#e9c46a33;color:#b8860b;border-radius:3px;padding:.1rem .3rem">Gruppe</span>' : '';
     const rowBg = hasGrpStyle ? 'background:#fffdf0' : '';
     const daysStr = r.days_per != null ? r.days_per.toFixed(1).replace('.',',') + ' Tage' : '–';
-    const tog = isGrp ? '<span class="stk-toggle" style="display:inline-block;width:1.3rem;color:#cc0000">▶</span>' : '<span style="display:inline-block;width:1.3rem"></span>';
+    const tog = isGrp ? '<span class="stk-toggle" style="float:left;margin-left:-1.4rem;width:1.2rem;color:#cc0000;text-align:center">\u25b6</span>' : '';
     const dataGrp = isGrp ? ' data-grp="' + r.n.replace(/"/g,'') + '"' : '';
     const cursor = isGrp ? 'cursor:pointer' : '';
     return '<tr class="' + (isGrp ? 'stk-grp-row' : '') + '" style="' + rowBg + ';' + cursor + '"' + dataGrp + '>'
-      + '<td>' + tog + r.n + grpMark + '<br><span class="badge">' + r.cat + '</span></td>'
+      + '<td style="padding-left:1.4rem">' + tog + r.n + grpMark + '<br><span class="badge">' + r.cat + '</span></td>'
       + '<td class="num"><strong>' + r.stk_year.toFixed(1).replace('.',',') + ' Stk</strong></td>'
       + '<td class="num" style="color:#457b9d">' + daysStr + '</td>'
       + '<td class="num" style="color:#888">' + r.stk_total + ' Stk</td></tr>';
