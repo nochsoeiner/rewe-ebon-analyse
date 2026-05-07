@@ -2653,17 +2653,19 @@ function _applyStk() {{
     const grpMark = hasGrpStyle ? ' <span style="font-size:.7rem;background:#e9c46a33;color:#b8860b;border-radius:3px;padding:.1rem .3rem">Gruppe</span>' : '';
     const rowBg = hasGrpStyle ? 'background:#fffdf0' : '';
     const daysStr = r.days_per != null ? r.days_per.toFixed(1).replace('.',',') + ' Tage' : '–';
-    const toggle = isGrp ? '<span class="stk-toggle" style="color:#cc0000;margin-right:.3rem">▶</span>' : '<span style="display:inline-block;width:1rem;margin-right:.3rem"></span>';
-    const nm = r.n.replace(/'/g, '');
-    const onclick = isGrp ? 'onclick="toggleStkGroup("+ JSON.stringify(nm) +",this)"' : '';
+    const tog = isGrp ? '<span class="stk-toggle" style="color:#cc0000;margin-right:.3rem">\u25b6</span>' : '<span style="display:inline-block;width:1rem;margin-right:.3rem"></span>';
+    const dataGrp = isGrp ? ' data-grp="' + r.n.replace(/"/g,'') + '"' : '';
     const cursor = isGrp ? 'cursor:pointer' : '';
-    return '<tr style="' + rowBg + ';' + cursor + '" ' + onclick + '>'
-      + '<td>' + toggle + r.n + grpMark + '<br><span class="badge">' + r.cat + '</span></td>'
+    return '<tr class="' + (isGrp ? 'stk-grp-row' : '') + '" style="' + rowBg + ';' + cursor + '"' + dataGrp + '>'
+      + '<td>' + tog + r.n + grpMark + '<br><span class="badge">' + r.cat + '</span></td>'
       + '<td class="num"><strong>' + r.stk_year.toFixed(1).replace('.',',') + ' Stk</strong></td>'
       + '<td class="num" style="color:#457b9d">' + daysStr + '</td>'
       + '<td class="num" style="color:#888">' + r.stk_total + ' Stk</td></tr>';
   }});
   document.getElementById('stk-body').innerHTML = rows.join('');
+  document.querySelectorAll('#stk-body .stk-grp-row').forEach(row => {{
+    row.addEventListener('click', () => toggleStkGroup(row.dataset.grp, row));
+  }});
 }}
 function filterStk() {{ _applyStk(); }}
 function sortStk(th) {{
@@ -2679,11 +2681,11 @@ function toggleStkGroup(name, row) {{
   const toggle = row.querySelector('.stk-toggle');
   if (next && next.classList.contains('stk-expand-row')) {{
     next.remove();
-    if (toggle) toggle.textContent = '▶';
+    if (toggle) toggle.textContent = '\u25b6';
     return;
   }}
   document.querySelectorAll('.stk-expand-row').forEach(r => r.remove());
-  document.querySelectorAll('.stk-toggle').forEach(t => t.textContent = '▶');
+  document.querySelectorAll('.stk-toggle').forEach(t => t.textContent = '\u25b6');
   const items = STK_DETAIL[name] || [];
   const itemRows = items.map(i => {{
     const d = i.days_per != null ? i.days_per.toFixed(1).replace('.',',') + ' Tage' : '–';
@@ -2700,13 +2702,12 @@ function toggleStkGroup(name, row) {{
   cell.colSpan = 4;
   cell.style.padding = '0';
   cell.innerHTML = '<table style="width:100%;font-size:.85rem"><thead><tr>'
-    + '<th>Artikel</th><th class="num">Stk/Jahr</th><th class="num">Hält ø</th><th class="num">Gesamt</th>'
+    + '<th>Artikel</th><th class="num">Stk/Jahr</th><th class="num">H\u00e4lt \u00f8</th><th class="num">Gesamt</th>'
     + '</tr></thead><tbody>' + itemRows + '</tbody></table>';
   expand.appendChild(cell);
   row.after(expand);
-  if (toggle) toggle.textContent = '▼';
+  if (toggle) toggle.textContent = '\u25bc';
 }}
-
 let _lifeSort = {{ key: 'days_per', dir: 1 }};
 function renderLifespan() {{
   const q = (document.getElementById('life-search')?.value || '').toLowerCase();
