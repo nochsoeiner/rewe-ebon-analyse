@@ -2657,7 +2657,7 @@ function _applyStk() {{
     const dataGrp = isGrp ? ' data-grp="' + r.n.replace(/"/g,'') + '"' : '';
     const cursor = isGrp ? 'cursor:pointer' : '';
     return '<tr class="' + (isGrp ? 'stk-grp-row' : '') + '" style="' + rowBg + ';' + cursor + '"' + dataGrp + '>'
-      + '<td style="line-height:1.6">' + tog + r.n + grpMark + ' <span class="badge">' + r.cat + '</span></td>'
+      + '<td>' + tog + r.n + grpMark + '<br><span class="badge">' + r.cat + '</span></td>'
       + '<td class="num"><strong>' + r.stk_year.toFixed(1).replace('.',',') + ' Stk</strong></td>'
       + '<td class="num" style="color:#457b9d">' + daysStr + '</td>'
       + '<td class="num" style="color:#888">' + r.stk_total + ' Stk</td></tr>';
