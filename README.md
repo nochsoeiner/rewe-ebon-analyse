@@ -3,6 +3,12 @@
 Lokales Analyse-Tool für REWE eBon-Kassenbons (EML mit PDF-Anhang).
 Erstellt einen interaktiven HTML-Bericht aus den eigenen Einkaufsdaten.
 
+<img width="661" height="887" alt="Bildschirmfoto 2026-03-27 um 14 51 14" src="https://github.com/user-attachments/assets/7dbbb74f-a8b4-4861-9823-aa0f78679b72" />
+
+
+<img width="617" height="899" alt="Bildschirmfoto 2026-03-27 um 14 50 33" src="https://github.com/user-attachments/assets/22e96a17-1b9f-49d3-992a-847bb0cbabff" />
+
+
 ## Features
 
 - 📊 **Dashboard** – Monatsausgaben, Jahresübersicht, Top-30-Artikel (nach Häufigkeit & Ausgaben), Kategorien, Warenkorbanalyse, Saisonale Muster, Monatsforecast
