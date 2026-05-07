@@ -653,6 +653,16 @@ def generate_report(conn: sqlite3.Connection):
             pass
     def _grp(name): return _grp_map.get(name, name)
 
+    # ── Kategorie-Überschreibungen laden (categories_override.json) ──────────
+    _cat_override_file = SCRIPT_DIR / 'categories_override.json'
+    _cat_override = {}
+    if _cat_override_file.exists():
+        try:
+            _cat_override = json.loads(_cat_override_file.read_text('utf-8'))
+        except Exception:
+            pass
+    def _eff_cat(name, cat): return _cat_override.get(name, cat)
+
     def fmt(v):
         """Float → '1.234,56'"""
         if v is None: return '–'
@@ -901,6 +911,34 @@ def generate_report(conn: sqlite3.Connection):
     _seas_cats   = sorted(set(r[1] for r in seasonal_raw))
     _seas_map    = {s: {r[1]: float(r[2]) for r in seasonal_raw if r[0]==s} for s in _seasons_ord}
 
+    # Wie oft kommt jede Saison im Datensatz vor? (z. B. Winter 24/25 + 25/26 = 2)
+    # Damit wir nicht doppelt zählen, wenn der Zeitraum > 1 Jahr abdeckt.
+    _season_counts = {s: 0 for s in _seasons_ord}
+    _season_year_set = set()
+    for _row in conn.execute("""
+        SELECT DISTINCT
+            CASE
+                WHEN CAST(substr(date,6,2) AS INT)=12 THEN CAST(substr(date,1,4) AS INT)+1
+                WHEN CAST(substr(date,6,2) AS INT) IN (1,2) THEN CAST(substr(date,1,4) AS INT)
+                ELSE CAST(substr(date,1,4) AS INT)
+            END as season_year,
+            CASE
+                WHEN CAST(substr(date,6,2) AS INT) IN (12,1,2) THEN 'Winter'
+                WHEN CAST(substr(date,6,2) AS INT) IN (3,4,5) THEN 'Frühling'
+                WHEN CAST(substr(date,6,2) AS INT) IN (6,7,8) THEN 'Sommer'
+                ELSE 'Herbst'
+            END as season
+        FROM receipts
+    """).fetchall():
+        _season_year_set.add((_row[0], _row[1]))
+    for _, _s in _season_year_set:
+        _season_counts[_s] += 1
+    # Normalisieren: Werte durch Anzahl der Saison-Auftritte teilen
+    for _s in _seasons_ord:
+        _n = max(_season_counts.get(_s, 1), 1)
+        if _n > 1:
+            _seas_map[_s] = {_c: _v / _n for _c, _v in _seas_map[_s].items()}
+
     # ── Ausgaben-Forecast ────────────────────────────────────────────────────
     import calendar as _cal
     _curr_month    = datetime.now().strftime('%Y-%m')
@@ -1035,9 +1073,10 @@ def generate_report(conn: sqlite3.Connection):
     _cons_raw = {}
     for _cn, _cp, _cu, _cq, _cc, _crid in _cons_rows:
         if _cn not in _cons_raw:
-            _cons_raw[_cn] = {'stk': 0, 'is_weight': False, 'cat': _cc}
+            _cons_raw[_cn] = {'stk': 0, 'kg': 0.0, 'is_weight': False, 'cat': _cc}
         if _cq == 1 and abs(_cu - _cp) > 0.01:
             _cons_raw[_cn]['is_weight'] = True
+            _cons_raw[_cn]['kg'] += _cp / _cu
         else:
             _cons_raw[_cn]['stk'] += _cq
     _stk_detail = {}
@@ -1055,6 +1094,31 @@ def generate_report(conn: sqlite3.Connection):
         if _items:
             _stk_detail[_gname] = sorted(_items, key=lambda x: x['stk_year'], reverse=True)
     stk_detail_js = json.dumps(_stk_detail, ensure_ascii=False)
+
+    _lifespan_detail = {}
+    for _gname, _aliases in _groups.items():
+        _items = []
+        for _alias in _aliases:
+            _d = _cons_raw.get(_alias)
+            if not _d:
+                continue
+            if _d['is_weight'] and _d['kg'] > 0.01:
+                _amount, _unit = _d['kg'], 'kg'
+            elif not _d['is_weight'] and _d['stk'] > 0:
+                _amount, _unit = float(_d['stk']), 'Stk'
+            else:
+                continue
+            _dpu = _date_span / _amount if _amount > 0 else None
+            _pwk = _amount * 7 / _date_span if _date_span else None
+            _items.append({
+                'n': _alias, 'unit': _unit,
+                'amount':   round(_amount, 2),
+                'days_per': round(_dpu, 1) if _dpu else None,
+                'per_week': round(_pwk, 2) if _pwk else None,
+            })
+        if _items:
+            _lifespan_detail[_gname] = sorted(_items, key=lambda x: (x['days_per'] is None, x['days_per'] or 0))
+    lifespan_detail_js = json.dumps(_lifespan_detail, ensure_ascii=False)
 
     # Haltbarkeit & Wochenverbrauch (Stück + Gewicht vereint)
     consumption_lifespan = []
@@ -1159,7 +1223,7 @@ def generate_report(conn: sqlite3.Connection):
             'q': row[3],
             'd': row[4],
             'src': row[5],
-            'cat': row[6],
+            'cat': _eff_cat(row[0], row[6]),
         }
         for row in all_items
     ], ensure_ascii=False)
@@ -1176,7 +1240,7 @@ def generate_report(conn: sqlite3.Connection):
             'pdf': 'pdfs/' + row[6].replace('.eml', '.pdf'),
             'bonus': row[7],
             'lines': [
-                {'n': i[0], 'p': i[1], 'u': i[2], 'q': i[3], 'cat': i[6]}
+                {'n': i[0], 'p': i[1], 'u': i[2], 'q': i[3], 'cat': _eff_cat(i[0], i[6])}
                 for i in items_by_src.get(row[6], [])
             ],
         }
@@ -1205,6 +1269,7 @@ def generate_report(conn: sqlite3.Connection):
     consumption_kg_js       = json.dumps(consumption_kg,       ensure_ascii=False)
     consumption_stk_js      = json.dumps(consumption_stk,      ensure_ascii=False)
     consumption_lifespan_js = json.dumps(consumption_lifespan, ensure_ascii=False)
+    lifespan_detail_js      = json.dumps(_lifespan_detail,     ensure_ascii=False)
     reorder_js         = json.dumps(reorder,          ensure_ascii=False)
     basket_js          = json.dumps(basket_pairs, ensure_ascii=False)
     seasonal_cats_js   = json.dumps(_seas_cats)
@@ -1212,6 +1277,8 @@ def generate_report(conn: sqlite3.Connection):
     price_alarm_js     = json.dumps(price_alarm, ensure_ascii=False)
     price_vol_js       = json.dumps(_price_vol, ensure_ascii=False)
     suggestions_js     = json.dumps(_grp_suggestions, ensure_ascii=False)
+    cat_override_js    = json.dumps(_cat_override, ensure_ascii=False)
+    category_names_js  = json.dumps(list(CATEGORIES.keys()) + ['Sonstiges'], ensure_ascii=False)
     forecast_js        = json.dumps({
         'month': _curr_month, 'spent': _curr_spending, 'forecast': _forecast,
         'hist_avg': float(_hist_avg_row), 'vs_avg': _vs_avg,
@@ -1345,6 +1412,51 @@ input:focus{{outline:2px solid #cc000066;border-color:#cc0000}}
 .scroll thead th{{position:sticky;top:0;z-index:1;box-shadow:0 2px 0 #aa0000}}
 .badge{{display:inline-block;background:#cc000015;color:#cc0000;border-radius:4px;
         padding:.1rem .45rem;font-size:.78rem;font-weight:600}}
+.sl-section{{max-width:680px;margin:0 auto}}
+.sl-header{{display:flex;align-items:center;justify-content:space-between;
+            flex-wrap:wrap;gap:.8rem;margin-bottom:1.2rem}}
+.sl-controls{{display:flex;gap:.5rem;flex-wrap:wrap;align-items:center}}
+.sl-controls select{{padding:.4rem .6rem;border:1px solid #ddd;border-radius:8px;
+                     font-size:.88rem;background:#fff;cursor:pointer}}
+.sl-btn{{padding:.4rem .9rem;border:1px solid #ddd;border-radius:8px;background:#fff;
+        font-size:.88rem;cursor:pointer;transition:.15s}}
+.sl-btn:hover{{background:#fff5f5;border-color:#cc0000}}
+.sl-cards{{display:flex;flex-direction:column;gap:.5rem;margin-bottom:1.2rem}}
+.sl-card{{display:flex;align-items:center;gap:1rem;padding:.9rem 1.1rem;
+         border-radius:14px;background:#e76f51;color:#fff;cursor:pointer;
+         transition:transform .12s,opacity .15s;user-select:none}}
+.sl-card:hover{{transform:translateX(2px)}}
+.sl-card:active{{transform:scale(0.98)}}
+.sl-card .sl-icon{{font-size:1.6rem;width:2.4rem;text-align:center;flex-shrink:0}}
+.sl-card .sl-name{{flex:1;font-weight:600;font-size:1.05rem}}
+.sl-card .sl-meta{{font-size:.78rem;opacity:.85;text-align:right;line-height:1.3}}
+.sl-card .sl-meta b{{font-size:.95rem;font-weight:700}}
+.sl-recent .sl-card{{background:#5a9b9b}}
+.sl-card.sl-overdue{{background:#cc4040}}
+.sl-empty{{padding:1.5rem;text-align:center;color:#888;background:#fafafa;
+          border-radius:12px;border:1px dashed #ddd}}
+.sl-divider{{display:flex;align-items:center;gap:.6rem;color:#666;
+            font-size:.9rem;font-weight:600;margin:.5rem 0 .8rem 0}}
+.sl-divider-toggle{{display:inline-block;width:1.1rem;cursor:pointer;
+                    color:#cc0000;transition:transform .2s}}
+.sl-collapsed .sl-divider-toggle{{transform:rotate(-90deg)}}
+.sl-collapsed .sl-recent{{display:none}}
+.sl-divider-count{{font-weight:400;color:#aaa;font-size:.82rem;margin-left:auto}}
+.sl-input-wrap{{display:flex;gap:.5rem;align-items:center;
+                background:#f5f5f5;border-radius:30px;padding:.4rem .5rem .4rem 1.2rem;
+                margin-top:1.5rem}}
+.sl-input-wrap input{{flex:1;border:none;background:transparent;outline:none;
+                      font-size:1rem;padding:.4rem 0}}
+.sl-add{{width:2.4rem;height:2.4rem;border-radius:50%;border:none;
+        background:#2a9d8f;color:#fff;font-size:1.4rem;cursor:pointer;
+        display:flex;align-items:center;justify-content:center}}
+.sl-add:hover{{background:#258274}}
+.cat-badge-sel{{display:inline-block;background:#cc000015;color:#cc0000;
+                border:1px solid transparent;border-radius:4px;padding:.05rem .35rem;
+                font-size:.78rem;font-weight:600;cursor:pointer;
+                appearance:none;-webkit-appearance:none;font-family:inherit}}
+.cat-badge-sel:hover{{border-color:#cc0000;background:#cc000022}}
+.cat-badge-sel:focus{{outline:none;border-color:#cc0000;background:#fff}}
 #trend-picker{{display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:1rem;
                max-height:160px;overflow-y:auto;border:1px solid #eee;border-radius:8px;padding:.5rem}}
 #trend-picker label{{display:flex;align-items:center;gap:.3rem;font-size:.82rem;cursor:pointer;
@@ -1371,11 +1483,11 @@ footer{{text-align:center;padding:2rem;color:#aaa;font-size:.78rem}}
 <nav>
   <button class="active" onclick="showTab('dashboard')">Dashboard</button>
   <button onclick="showTab('trends')">Preisentwicklung</button>
-  <button onclick="showTab('stats')">Statistiken</button>
+  <button onclick="showTab('shopping')">🛒 Einkaufszettel</button>
   <button onclick="showTab('positions')">Alle Positionen</button>
   <button onclick="showTab('receipts')">Alle Belege</button>
   <button onclick="showTab('verbrauch')">Verbrauch</button>
-  <button onclick="showTab('gruppen')">Gruppen</button>
+  <button onclick="showTab('gruppen')">Artikel-Gruppen</button>
   <button onclick="showTab('extras')">Extras</button>
 </nav>
 
@@ -1433,6 +1545,42 @@ footer{{text-align:center;padding:2rem;color:#aaa;font-size:.78rem}}
       </div>
     </section>
   </div>
+
+  <div class="two-col">
+    <section>
+      <h2>Einkäufe nach Wochentag</h2>
+      <div class="chart-wrap"><canvas id="weekdayChart"></canvas></div>
+    </section>
+    <section>
+      <h2>Wochentag-Details</h2>
+      <table>
+        <thead>{tr(['Tag','Einkäufe','Ø Betrag','Gesamt'],'th')}</thead>
+        <tbody>{weekday_rows}</tbody>
+      </table>
+    </section>
+  </div>
+
+  <section>
+    <h2>Bonus-Guthaben</h2>
+    <div class="stats-grid" style="margin-bottom:1rem">
+      <div class="stat"><div class="val">{feur(bonus_total_earned)}</div>
+           <div class="lbl">Gesamt gesammelt</div></div>
+      <div class="stat"><div class="val">{feur(bonus_current_bal)}</div>
+           <div class="lbl">Aktuelles Guthaben</div></div>
+      <div class="stat"><div class="val">{fmt(bonus_avg_pct)} %</div>
+           <div class="lbl">Ø Bonus-Rate</div></div>
+    </div>
+    <div class="two-col">
+      <div>
+        <div style="font-size:.85rem;color:#777;margin-bottom:.4rem">Gesammelt &amp; Guthaben</div>
+        <div class="chart-wrap"><canvas id="bonusChart"></canvas></div>
+      </div>
+      <div>
+        <div style="font-size:.85rem;color:#777;margin-bottom:.4rem">Bonus-Rate pro Monat (% des Umsatzes)</div>
+        <div class="chart-wrap"><canvas id="bonusPctChart"></canvas></div>
+      </div>
+    </div>
+  </section>
 </div>
 </div>
 
@@ -1484,48 +1632,6 @@ footer{{text-align:center;padding:2rem;color:#aaa;font-size:.78rem}}
       </div>
     </section>
   </div>
-</div>
-</div>
-
-<!-- ═══════════════════════════════════════════ STATISTIKEN ═══ -->
-<div id="page-stats" class="page">
-<div class="container">
-
-  <div class="two-col">
-    <section>
-      <h2>Einkäufe nach Wochentag</h2>
-      <div class="chart-wrap"><canvas id="weekdayChart"></canvas></div>
-    </section>
-    <section>
-      <h2>Wochentag-Details</h2>
-      <table>
-        <thead>{tr(['Tag','Einkäufe','Ø Betrag','Gesamt'],'th')}</thead>
-        <tbody>{weekday_rows}</tbody>
-      </table>
-    </section>
-  </div>
-
-  <section>
-    <h2>Bonus-Guthaben</h2>
-    <div class="stats-grid" style="margin-bottom:1rem">
-      <div class="stat"><div class="val">{feur(bonus_total_earned)}</div>
-           <div class="lbl">Gesamt gesammelt</div></div>
-      <div class="stat"><div class="val">{feur(bonus_current_bal)}</div>
-           <div class="lbl">Aktuelles Guthaben</div></div>
-      <div class="stat"><div class="val">{fmt(bonus_avg_pct)} %</div>
-           <div class="lbl">Ø Bonus-Rate</div></div>
-    </div>
-    <div class="two-col">
-      <div>
-        <div style="font-size:.85rem;color:#777;margin-bottom:.4rem">Gesammelt &amp; Guthaben</div>
-        <div class="chart-wrap"><canvas id="bonusChart"></canvas></div>
-      </div>
-      <div>
-        <div style="font-size:.85rem;color:#777;margin-bottom:.4rem">Bonus-Rate pro Monat (% des Umsatzes)</div>
-        <div class="chart-wrap"><canvas id="bonusPctChart"></canvas></div>
-      </div>
-    </div>
-  </section>
 
   <section>
     <h2>Kürzlich gestiegen <span style="font-size:.82rem;font-weight:400;color:#888">– zuletzt gekaufte Artikel, deren Preis in den letzten 90 Tagen um &gt; 10 % gestiegen ist</span></h2>
@@ -1647,6 +1753,43 @@ footer{{text-align:center;padding:2rem;color:#aaa;font-size:.78rem}}
 </div>
 
 <!-- ═══════════════════════════════════════════ VERBRAUCH ═══ -->
+<!-- ═══════════════════════════════════════════ EINKAUFSZETTEL ═══ -->
+<div id="page-shopping" class="page">
+<div class="container">
+  <section class="sl-section">
+    <div class="sl-header">
+      <h2 style="margin:0">🛒 Einkaufszettel</h2>
+      <div class="sl-controls">
+        <button class="sl-btn" onclick="copyShoppingList()">📋 Kopieren</button>
+        <button class="sl-btn" onclick="window.print()">🖨️ Drucken</button>
+        <button class="sl-btn" onclick="clearActiveList()">🗑️ Leeren</button>
+      </div>
+    </div>
+
+    <div class="sl-cards" id="sl-active"></div>
+
+    <div class="sl-input-wrap">
+      <input type="text" id="sl-input" placeholder="Ich brauche…"
+             onkeydown="if(event.key==='Enter')addCustomItem()">
+      <button class="sl-add" onclick="addCustomItem()">+</button>
+    </div>
+
+    <div class="sl-divider">
+      <span class="sl-divider-toggle" onclick="this.parentNode.parentNode.classList.toggle('sl-collapsed')">▼</span>
+      <span>Zuletzt verwendet</span>
+      <select id="sl-horizon" onchange="renderShoppingList()" style="margin-left:.6rem">
+        <option value="0">Nur überfällig</option>
+        <option value="3">+ nächste 3 Tage</option>
+        <option value="7" selected>+ nächste 7 Tage</option>
+        <option value="14">+ nächste 14 Tage</option>
+      </select>
+      <span class="sl-divider-count" id="sl-recent-count"></span>
+    </div>
+    <div class="sl-cards sl-recent" id="sl-recent"></div>
+  </section>
+</div>
+</div>
+
 <div id="page-verbrauch" class="page">
 <div class="container">
 
@@ -1784,7 +1927,7 @@ footer{{text-align:center;padding:2rem;color:#aaa;font-size:.78rem}}
 <div class="container">
 
   <section>
-    <h2>Saisonale Kaufmuster</h2>
+    <h2>Saisonale Kaufmuster <span style="font-size:.82rem;font-weight:400;color:#888">– Ø pro Saison (normalisiert über mehrere Jahre)</span></h2>
     <div class="chart-wrap" style="height:380px"><canvas id="seasonChart"></canvas></div>
   </section>
 
@@ -1827,10 +1970,13 @@ const BONUS_BALANCE   = {bonus_balance_js};
 const BONUS_PCT       = {bonus_pct_js};
 const INFLATION       = {inflation_js};
 const GROUPS          = {groups_js};
+let   CAT_OVERRIDE    = {cat_override_js};
+const CATEGORY_NAMES  = {category_names_js};
 const CONSUMPTION_KG       = {consumption_kg_js};
 const CONSUMPTION_STK      = {consumption_stk_js};
 const STK_DETAIL           = {stk_detail_js};
 const CONSUMPTION_LIFESPAN = {consumption_lifespan_js};
+const LIFESPAN_DETAIL      = {lifespan_detail_js};
 const REORDER         = {reorder_js};
 const BASKET          = {basket_js};
 const SEASONAL_CATS   = {seasonal_cats_js};
@@ -1847,7 +1993,7 @@ function showTab(id) {{
   document.getElementById('page-' + id).classList.add('active');
   event.target.classList.add('active');
   if (id === 'trends'    && !window._trendInit) initTrends();
-  if (id === 'stats'     && !window._statsInit) initStats();
+  if (id === 'shopping'  && !window._slInit)    initShopping();
   if (id === 'positions' && !window._posInit)   initPositions();
   if (id === 'receipts'  && !window._recInit)   initReceipts();
   if (id === 'verbrauch' && !window._verbrauchInit) initVerbrauch();
@@ -1911,7 +2057,7 @@ document.addEventListener('DOMContentLoaded', () => {{
 
 function eur(v) {{
   if (v == null) return '–';
-  return '€\u00a0' + v.toFixed(2).replace('.', ',');
+  return '€ ' + v.toLocaleString('de-DE', {{minimumFractionDigits:2, maximumFractionDigits:2}});
 }}
 function isoDE(s) {{
   if (!s) return '';
@@ -1969,7 +2115,7 @@ new Chart(document.getElementById('monthChart'), {{
     responsive: true,
     maintainAspectRatio: false,
     plugins: {{ legend: {{ display: false }} }},
-    scales: {{ y: {{ ticks: {{ callback: v => '€ ' + v.toFixed(0) }} }} }}
+    scales: {{ y: {{ beginAtZero: true, ticks: {{ callback: v => '€ ' + v.toLocaleString('de-DE', {{maximumFractionDigits:0}}) }} }} }}
   }}
 }});
 
@@ -2064,7 +2210,7 @@ function updateTrendChart() {{
         responsive: true,
         maintainAspectRatio: false,
         plugins: {{ legend: {{ position: 'bottom', labels: {{ boxWidth: 12, font: {{ size: 11 }} }} }} }},
-        scales: {{ y: {{ ticks: {{ callback: v => '€ ' + v.toFixed(2).replace('.',',') }} }} }}
+        scales: {{ y: {{ beginAtZero: true, ticks: {{ callback: v => '€ ' + v.toLocaleString('de-DE', {{minimumFractionDigits:2, maximumFractionDigits:2}}) }} }} }}
       }}
     }});
   }} else {{
@@ -2101,6 +2247,8 @@ function initTrends() {{
       <td class="num" style="color:#2a9d8f;font-weight:600">± ${{r.swing.toFixed(1).replace('.',',')}} %</td>
     </tr>`
   ).join('');
+  renderInflation(INFLATION);
+  renderPriceAlarm();
 }}
 
 function selectSingleItem(name) {{
@@ -2111,10 +2259,8 @@ function selectSingleItem(name) {{
   document.getElementById('trendChart').scrollIntoView({{behavior:'smooth', block:'center'}});
 }}
 
-// ── Statistiken ──────────────────────────────────────────────────────────────
-function initStats() {{
-  window._statsInit = true;
-
+// ── Wochentag- & Bonus-Charts (Dashboard) ────────────────────────────────────
+(function initDashboardExtraCharts() {{
   new Chart(document.getElementById('weekdayChart'), {{
     type: 'bar',
     data: {{
@@ -2132,7 +2278,7 @@ function initStats() {{
       plugins: {{ legend: {{ position: 'bottom' }} }},
       scales: {{
         y:  {{ position: 'left',  ticks: {{ stepSize: 1 }} }},
-        y2: {{ position: 'right', ticks: {{ callback: v => '€ ' + v.toFixed(0) }},
+        y2: {{ position: 'right', beginAtZero: true, ticks: {{ callback: v => '€ ' + v.toLocaleString('de-DE', {{maximumFractionDigits:0}}) }},
                grid: {{ drawOnChartArea: false }} }},
       }}
     }}
@@ -2206,11 +2352,7 @@ function initStats() {{
       }}
     }}
   }});
-
-  // Inflation-Tabelle initial befüllen
-  renderInflation(INFLATION);
-  renderPriceAlarm();
-}}
+}})();
 
 let _infMode = 'all';
 function filterInflation(mode, btn) {{
@@ -2280,7 +2422,7 @@ function applyPositions() {{
     return `<tr>
       <td class="num">${{isoDE(r.d)}}</td>
       <td>${{r.n}}</td>
-      <td><span class="badge">${{r.cat}}</span></td>
+      <td>${{catSelect(r.n, effCat(r.n,r.cat))}}</td>
       <td class="num">${{eur(r.p)}}</td>
       <td class="num">${{r.u > 0 ? (r.q < 1 ? eur(r.u)+' /kg' : eur(r.u)+' /Stk') : '–'}}</td>
       <td class="num">${{r.q > 1 ? r.q+'×' : r.q < 1 ? (r.q*1000).toFixed(0)+' g' : '–'}}</td>
@@ -2291,6 +2433,31 @@ function applyPositions() {{
 }}
 
 function filterPositions() {{ applyPositions(); }}
+
+// ── Kategorie-Override ───────────────────────────────────────────────────────
+function effCat(name, cat) {{ return CAT_OVERRIDE[name] || cat; }}
+
+function catSelect(name, cur) {{
+  const safe = String(name).replace(/"/g, '&quot;');
+  const opts = CATEGORY_NAMES.map(c =>
+    '<option value="' + c + '"' + (c === cur ? ' selected' : '') + '>' + c + '</option>'
+  ).join('');
+  return '<select class="cat-badge-sel" data-name="' + safe + '" '
+       + 'onclick="event.stopPropagation()" '
+       + 'onchange="onCatChange(this)">' + opts + '</select>';
+}}
+
+function onCatChange(sel) {{
+  const name = sel.dataset.name;
+  const cat  = sel.value;
+  CAT_OVERRIDE[name] = cat;
+  fetch('http://localhost:{GROUPS_SERVER_PORT}/save-cat-override', {{
+    method: 'POST',
+    headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify(CAT_OVERRIDE)
+  }}).catch(() => {{}});
+  applyPositions();
+}}
 
 // ── Alle Belege ─────────────────────────────────────────────────────────────
 let recSort = {{ key: 'date', dir: -1 }};
@@ -2650,14 +2817,14 @@ function _applyStk() {{
   const rows = data.map(r => {{
     const isGrp = _stkGrpNames.has(r.n) && STK_DETAIL[r.n];
     const hasGrpStyle = _stkGrpNames.has(r.n);
-    const grpMark = hasGrpStyle ? ' <span style="font-size:.7rem;background:#e9c46a33;color:#b8860b;border-radius:3px;padding:.1rem .3rem">Gruppe</span>' : '';
+    const grpMark = hasGrpStyle ? ' <span style="font-size:.7rem;background:#e9c46a33;color:#b8860b;border-radius:3px;padding:.1rem .3rem;vertical-align:middle">Gruppe</span>' : '';
     const rowBg = hasGrpStyle ? 'background:#fffdf0' : '';
     const daysStr = r.days_per != null ? r.days_per.toFixed(1).replace('.',',') + ' Tage' : '–';
     const tog = isGrp ? '<span class="stk-toggle" style="float:left;margin-left:-1.4rem;width:1.2rem;color:#cc0000;text-align:center">\u25b6</span>' : '';
     const dataGrp = isGrp ? ' data-grp="' + r.n.replace(/"/g,'') + '"' : '';
     const cursor = isGrp ? 'cursor:pointer' : '';
     return '<tr class="' + (isGrp ? 'stk-grp-row' : '') + '" style="' + rowBg + ';' + cursor + '"' + dataGrp + '>'
-      + '<td style="padding-left:1.4rem">' + tog + r.n + grpMark + '<br><span class="badge">' + r.cat + '</span></td>'
+      + '<td style="padding-left:1.4rem">' + tog + r.n + grpMark + '<br><span class="badge" style="display:inline-block;margin-top:3px">' + r.cat + '</span></td>'
       + '<td class="num"><strong>' + r.stk_year.toFixed(1).replace('.',',') + ' Stk</strong></td>'
       + '<td class="num" style="color:#457b9d">' + daysStr + '</td>'
       + '<td class="num" style="color:#888">' + r.stk_total + ' Stk</td></tr>';
@@ -2721,19 +2888,19 @@ function renderLifespan() {{
   }});
   const _lifeGrpNames = new Set(Object.keys(GROUPS));
   document.getElementById('life-body').innerHTML = data.map(r => {{
-    const isGrp = _lifeGrpNames.has(r.n);
-    const grpMark = isGrp ? ' <span style="font-size:.7rem;background:#e9c46a33;color:#b8860b;border-radius:3px;padding:.1rem .3rem">Gruppe</span>' : '';
+    const isGrp = _lifeGrpNames.has(r.n) && LIFESPAN_DETAIL[r.n];
+    const tog = isGrp ? '<span class="life-toggle" style="float:left;margin-left:-1.4rem;width:1.2rem;color:#cc0000;text-align:center">▶</span>' : '';
+    const grpMark = isGrp ? ' <span style="font-size:.7rem;background:#e9c46a33;color:#b8860b;border-radius:3px;padding:.1rem .3rem;vertical-align:middle">Gruppe</span>' : '';
     const rowBg = isGrp ? 'background:#fffdf0' : '';
+    const cursor = isGrp ? 'cursor:pointer' : '';
+    const dataGrp = isGrp ? ' data-grp="' + r.n.replace(/"/g,'') + '"' : '';
     const daysStr = r.days_per != null ? r.days_per.toFixed(1).replace('.',',') + ' Tage' : '–';
-    const pwAmt = r.per_week != null
-      ? (r.unit === 'kg' ? r.per_week.toFixed(2).replace('.',',') : r.per_week.toFixed(2).replace('.',','))
-      : '–';
-    const pwStr = r.per_week != null ? pwAmt + ' ' + r.unit : '–';
+    const pwStr = r.per_week != null ? r.per_week.toFixed(2).replace('.',',') + ' ' + r.unit : '–';
     const totStr = r.unit === 'kg'
       ? r.amount.toFixed(2).replace('.',',') + ' kg'
       : Math.round(r.amount) + ' Stk';
-    return '<tr style="' + rowBg + '">'
-      + '<td>' + r.n + grpMark + '<br><span class="badge">' + r.cat + '</span></td>'
+    return '<tr style="' + rowBg + ';' + cursor + '"' + dataGrp + '>'
+      + '<td style="padding-left:1.4rem">' + tog + r.n + grpMark + '<br><span class="badge" style="display:inline-block;margin-top:3px">' + r.cat + '</span></td>'
       + '<td>1 ' + r.unit + '</td>'
       + '<td class="num" style="color:#457b9d;font-weight:600">' + daysStr + '</td>'
       + '<td class="num"><strong>' + pwStr + '</strong></td>'
@@ -2741,8 +2908,43 @@ function renderLifespan() {{
       + '<td class="num" style="color:#888">' + totStr + '</td>'
       + '</tr>';
   }}).join('');
+  document.querySelectorAll('#life-body tr[data-grp]').forEach(row => {{
+    row.addEventListener('click', () => toggleLifespanGroup(row.dataset.grp, row));
+  }});
   const cnt = document.getElementById('life-count');
   if (cnt) cnt.textContent = data.length + ' Artikel';
+}}
+function toggleLifespanGroup(grp, row) {{
+  const existing = row.nextElementSibling;
+  if (existing && existing.classList.contains('life-expand-row')) {{
+    existing.remove();
+    row.querySelectorAll('.life-toggle').forEach(t => t.textContent = '▶');
+    return;
+  }}
+  document.querySelectorAll('.life-expand-row').forEach(r => r.remove());
+  document.querySelectorAll('.life-toggle').forEach(t => t.textContent = '▶');
+  const items = LIFESPAN_DETAIL[grp] || [];
+  const itemRows = items.map(d => {{
+    const ds = d.days_per != null ? d.days_per.toFixed(1).replace('.',',') + ' Tage' : '–';
+    const pw = d.per_week != null ? d.per_week.toFixed(2).replace('.',',') + ' ' + d.unit : '–';
+    const tot = d.unit === 'kg' ? d.amount.toFixed(2).replace('.',',') + ' kg' : Math.round(d.amount) + ' Stk';
+    return '<tr><td style="padding-left:.5rem;color:#555">' + d.n + '</td>'
+      + '<td>1 ' + d.unit + '</td>'
+      + '<td class="num" style="color:#457b9d">' + ds + '</td>'
+      + '<td class="num">' + pw + '</td>'
+      + '<td class="num"></td>'
+      + '<td class="num" style="color:#888">' + tot + '</td></tr>';
+  }}).join('');
+  const expand = document.createElement('tr');
+  expand.className = 'life-expand-row';
+  const cell = document.createElement('td');
+  cell.colSpan = 6;
+  cell.style.padding = '0';
+  cell.innerHTML = '<table style="width:100%;font-size:.85rem"><tbody>' + itemRows + '</tbody></table>';
+  expand.appendChild(cell);
+  row.after(expand);
+  const toggle = row.querySelector('.life-toggle');
+  if (toggle) toggle.textContent = '▼';
 }}
 function sortLifespan(th) {{
   const key = th.dataset.key;
@@ -2762,6 +2964,200 @@ function initVerbrauch() {{
   alignHeaders('kg-table');
   alignHeaders('stk-table');
   alignHeaders('life-table');
+}}
+
+// ── Einkaufszettel ───────────────────────────────────────────────────────────
+const _SL_ICONS = {{
+  'Obst':'🍎','Gemüse':'🥦','Fleisch & Wurst':'🥩','Fisch & Meeresfrüchte':'🐟',
+  'Milch & Käse & Eier':'🥛','Backwaren':'🥖','Getränke':'🥤','Tiefkühl':'🧊',
+  'Süßes & Snacks':'🍪','Grundnahrungsmittel':'🌾','Fertiggerichte & Konserven':'🥫',
+  'Körperpflege':'🧴','Haushalt':'🧽','Pfand':'♻️','Sonstiges':'📦'
+}};
+
+let _slActive = {{}};   // names der aktiv gewählten Artikel (Auto-Vorschläge, die der User akzeptiert hat)
+let _slCustom = [];     // eigene Einträge (sind immer aktiv, bis manuell entfernt)
+
+(function _slLoadState() {{
+  try {{ _slActive = JSON.parse(localStorage.getItem('rewe_sl_active') || '{{}}'); }} catch(e) {{}}
+  try {{ _slCustom = JSON.parse(localStorage.getItem('rewe_sl_custom') || '[]'); }} catch(e) {{}}
+}})();
+
+function _slSave() {{
+  try {{
+    localStorage.setItem('rewe_sl_active', JSON.stringify(_slActive));
+    localStorage.setItem('rewe_sl_custom', JSON.stringify(_slCustom));
+  }} catch(e) {{}}
+}}
+
+function _slLookupCat(name) {{
+  for (const r of ALL_ITEMS) if (r.n === name) return effCat(r.n, r.cat);
+  return 'Sonstiges';
+}}
+
+function initShopping() {{
+  window._slInit = true;
+  renderShoppingList();
+}}
+
+function _slEnrich(r, lifeMap) {{
+  const life = lifeMap[r.n];
+  let qty = '', unit = '';
+  if (life && life.per_week) {{
+    const weeks = Math.max(r.interval / 7, 1);
+    const amount = life.per_week * weeks;
+    if (life.unit === 'kg') {{
+      qty = amount.toFixed(2).replace('.', ',');
+      unit = 'kg';
+    }} else {{
+      qty = Math.max(1, Math.round(amount)).toString();
+      unit = 'Stk';
+    }}
+  }}
+  return {{ n: r.n, days: r.days, interval: r.interval, conf: r.conf,
+           qty, unit, custom: false, cat: _slLookupCat(r.n) }};
+}}
+
+function renderShoppingList() {{
+  const horizon = parseInt(document.getElementById('sl-horizon')?.value || '7', 10);
+  const lifeMap = {{}};
+  CONSUMPTION_LIFESPAN.forEach(r => lifeMap[r.n] = r);
+
+  const reorderMap = {{}};
+  REORDER.forEach(r => reorderMap[r.n] = r);
+
+  // Aktive Liste: vom User gewählte Auto-Vorschläge + alle Custom-Einträge
+  const activeAuto = Object.keys(_slActive)
+    .filter(n => reorderMap[n])
+    .map(n => _slEnrich(reorderMap[n], lifeMap));
+  const activeCustom = _slCustom.map(n => ({{
+    n, days: null, qty: '', unit: '', custom: true, cat: _slLookupCat(n)
+  }}));
+  const active = activeCustom.concat(activeAuto)
+    .sort((a, b) => {{
+      if (a.custom !== b.custom) return a.custom ? -1 : 1;  // Custom oben
+      return (a.days ?? 999) - (b.days ?? 999);
+    }});
+
+  // Vorschläge: nur Artikel mit messbarem Verbrauch (CONSUMPTION_LIFESPAN),
+  // mit REORDER-Datum gejoint. Pfand ausgeschlossen.
+  const suggestions = CONSUMPTION_LIFESPAN
+    .filter(life => life.cat !== 'Pfand')
+    .map(life => {{
+      const r = reorderMap[life.n];
+      if (!r || !r.plausible || r.seasonal) return null;
+      if (r.days > horizon) return null;
+      if (r.days < -Math.max(r.interval, 7)) return null;
+      if (_slActive[life.n]) return null;
+      // Empfohlene Menge aus Wochenverbrauch × Intervall
+      const weeks  = Math.max(r.interval / 7, 1);
+      const amount = life.per_week * weeks;
+      let qty = '', unit = '';
+      if (life.unit === 'kg') {{
+        qty = amount.toFixed(2).replace('.', ','); unit = 'kg';
+      }} else {{
+        qty = Math.max(1, Math.round(amount)).toString(); unit = 'Stk';
+      }}
+      return {{ n: life.n, days: r.days, interval: r.interval, qty, unit,
+               custom: false, cat: life.cat }};
+    }})
+    .filter(it => it !== null)
+    .sort((a, b) => {{
+      // Relative Position im Kaufzyklus: -1 = 1 Zyklus überfällig, 0 = heute
+      const ar = a.interval > 0 ? a.days / a.interval : a.days;
+      const br = b.interval > 0 ? b.days / b.interval : b.days;
+      return ar - br;
+    }});
+
+  document.getElementById('sl-active').innerHTML = active.length
+    ? active.map(_slCardHtml).join('')
+    : '<div class="sl-empty">Liste leer – wähle aus den Vorschlägen unten oder tippe etwas ein</div>';
+
+  document.getElementById('sl-recent').innerHTML = suggestions.length
+    ? suggestions.map(_slCardHtml).join('')
+    : '<div class="sl-empty" style="opacity:.6">Keine Vorschläge in diesem Zeitraum</div>';
+
+  document.getElementById('sl-recent-count').textContent =
+    suggestions.length ? suggestions.length + ' Vorschläge' : '';
+
+  document.querySelectorAll('#sl-active .sl-card').forEach(c => {{
+    c.addEventListener('click', () => _slRemoveFromActive(c.dataset.name));
+  }});
+  document.querySelectorAll('#sl-recent .sl-card').forEach(c => {{
+    c.addEventListener('click', () => _slAddToActive(c.dataset.name));
+  }});
+}}
+
+function _slAddToActive(name) {{
+  _slActive[name] = true;
+  _slSave();
+  renderShoppingList();
+}}
+
+function _slRemoveFromActive(name) {{
+  delete _slActive[name];
+  const idx = _slCustom.indexOf(name);
+  if (idx >= 0) _slCustom.splice(idx, 1);
+  _slSave();
+  renderShoppingList();
+}}
+
+function clearActiveList() {{
+  if (!Object.keys(_slActive).length && !_slCustom.length) return;
+  if (confirm('Aktive Einkaufsliste leeren?')) {{
+    _slActive = {{}};
+    _slCustom = [];
+    _slSave();
+    renderShoppingList();
+  }}
+}}
+
+function _slCardHtml(it) {{
+  const icon = _SL_ICONS[it.cat] || '📦';
+  const safe = String(it.n).replace(/"/g, '&quot;');
+  let meta = '';
+  if (it.custom) {{
+    meta = '<span style="opacity:.85">eigener Eintrag</span>';
+  }} else if (it.days != null) {{
+    if (it.days < 0)  meta = '<b>Überfällig</b><br>' + (-it.days) + ' Tage';
+    else if (it.days === 0) meta = '<b>Heute</b>';
+    else meta = '<b>in ' + it.days + ' T</b>' + (it.qty ? '<br>~ ' + it.qty + ' ' + it.unit : '');
+    if (it.qty && it.days != null && it.days >= 0) {{
+      meta = '<b>~ ' + it.qty + ' ' + it.unit + '</b><br>'
+           + (it.days === 0 ? 'heute' : 'in ' + it.days + ' T');
+    }}
+  }}
+  const cls = (!it.custom && it.days != null && it.days < 0) ? 'sl-card sl-overdue' : 'sl-card';
+  return '<div class="' + cls + '" data-name="' + safe + '">'
+       + '<span class="sl-icon">' + icon + '</span>'
+       + '<span class="sl-name">' + it.n + '</span>'
+       + '<span class="sl-meta">' + meta + '</span>'
+       + '</div>';
+}}
+
+function addCustomItem() {{
+  const inp = document.getElementById('sl-input');
+  const name = (inp.value || '').trim();
+  if (!name) return;
+  if (!_slCustom.includes(name)) _slCustom.push(name);
+  _slSave();
+  inp.value = '';
+  renderShoppingList();
+}}
+
+function copyShoppingList() {{
+  const lines = [];
+  document.querySelectorAll('#sl-active .sl-card').forEach(c => {{
+    const name = c.querySelector('.sl-name').textContent;
+    const meta = c.querySelector('.sl-meta').textContent.replace(/\s+/g, ' ').trim();
+    const qty  = (meta.match(/~\s*[\d,\.]+\s*(Stk|kg)/) || [''])[0];
+    lines.push('- ' + (qty ? qty + '  ' : '') + name);
+  }});
+  if (!lines.length) {{ alert('Liste ist leer.'); return; }}
+  const text = 'Einkaufszettel' + String.fromCharCode(10) + lines.join(String.fromCharCode(10));
+  navigator.clipboard.writeText(text).then(
+    () => alert('In Zwischenablage kopiert (' + lines.length + ' Artikel).'),
+    () => alert('Kopieren fehlgeschlagen.')
+  );
 }}
 
 // ── Forecast ────────────────────────────────────────────────────────────────
@@ -2832,7 +3228,8 @@ function renderSeasonChart() {{
       plugins: {{ legend: {{ position: 'bottom', labels: {{ boxWidth: 12, font: {{ size: 10 }} }} }} }},
       scales: {{
         x: {{ stacked: true }},
-        y: {{ stacked: true, ticks: {{ callback: v => '€ ' + v.toFixed(0) }} }},
+        y: {{ stacked: true, beginAtZero: true, min: 0,
+              ticks: {{ callback: v => '€ ' + v.toLocaleString('de-DE', {{maximumFractionDigits:0}}) }} }},
       }}
     }}
   }});
@@ -2962,9 +3359,9 @@ class _GroupsHandler(BaseHTTPRequestHandler):
             self.wfile.write(b'pong')
 
     def do_POST(self):
+        length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(length)
         if self.path == '/save-groups':
-            length = int(self.headers.get('Content-Length', 0))
-            body = self.rfile.read(length)
             try:
                 groups = json.loads(body)
                 (SCRIPT_DIR / 'groups.json').write_text(
@@ -2974,6 +3371,19 @@ class _GroupsHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(b'{"ok":true}')
                 print(f"\n  groups.json gespeichert ({len(groups)} Gruppen)")
+            except Exception as e:
+                self.send_response(500); self._cors(); self.end_headers()
+                self.wfile.write(str(e).encode())
+        elif self.path == '/save-cat-override':
+            try:
+                overrides = json.loads(body)
+                (SCRIPT_DIR / 'categories_override.json').write_text(
+                    json.dumps(overrides, ensure_ascii=False, indent=2), 'utf-8')
+                self.send_response(200); self._cors()
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(b'{"ok":true}')
+                print(f"\n  categories_override.json gespeichert ({len(overrides)} Einträge)")
             except Exception as e:
                 self.send_response(500); self._cors(); self.end_headers()
                 self.wfile.write(str(e).encode())

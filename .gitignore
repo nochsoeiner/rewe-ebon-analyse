@@ -1,8 +1,18 @@
 # Persönliche Daten – werden nicht ins Repo hochgeladen
 import/
 pdfs/
+pdfs_direct/
 rewe_ebons.db
+rewe_ebons_backup_*.db
 rewe_report.html
+rewe_direct.db
+rewe_direct_report.html
+rewe_direct.py
+groups.json
+categories_override.json
+
+# Tooling / Editor
+.claude/
 
 # macOS
 .DS_Store
