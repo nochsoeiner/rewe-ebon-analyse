@@ -1,8 +1,9 @@
 #!/bin/bash
 # export_rewe_mail.sh
-# Exportiert neue Mails aus dem Mail.app-Ordner "Rewe" als EML-Dateien.
+# Exportiert neue eBons aus dem Mail.app-Ordner "Rewe" sowie neue
+# Lieferdienst-Rechnungen aus den Posteingängen als EML-Dateien.
 
-IMPORT_DIR="/Users/marc/Library/Mobile Documents/com~apple~CloudDocs/Claude/Rewe/import"
+IMPORT_DIR="/Users/marc/Server/Lieferanten-Apps/Rewe/import"
 LOG="/tmp/rewe_mail_export.log"
 ID_FILE="$IMPORT_DIR/.exported_ids"
 
@@ -23,6 +24,8 @@ if application "Mail" is not running then
 end if
 
 tell application "Mail"
+    set candidateMessages to {}
+
     -- Rewe-Mailbox in allen Accounts suchen
     set targetMailbox to missing value
     repeat with anAccount in accounts
@@ -45,14 +48,30 @@ tell application "Mail"
         if targetMailbox is not missing value then exit repeat
     end repeat
 
-    if targetMailbox is missing value then
-        do shell script "echo 'FEHLER: Mailbox Rewe nicht gefunden.' >> " & quoted form of logFile
-        return
+    if targetMailbox is not missing value then
+        repeat with aMessage in messages of targetMailbox
+            set end of candidateMessages to aMessage
+        end repeat
+    else
+        do shell script "echo 'WARNUNG: Mailbox Rewe nicht gefunden.' >> " & quoted form of logFile
     end if
+
+    -- Lieferdienst-Rechnungen bleiben teilweise im Posteingang und landen
+    -- nicht im Ordner "Rewe". Deshalb dort zusätzlich gezielt suchen.
+    repeat with anAccount in accounts
+        try
+            set inboxMailbox to mailbox "INBOX" of anAccount
+            set shopMessages to every message of inboxMailbox whose subject contains "Rechnung zu B-"
+            repeat with aMessage in shopMessages
+                set end of candidateMessages to aMessage
+            end repeat
+        on error
+        end try
+    end repeat
 
     set newCount to 0
 
-    repeat with aMessage in messages of targetMailbox
+    repeat with aMessage in candidateMessages
         set msgId to message id of aMessage
 
         -- Prüfen ob bereits exportiert (exakter Zeilenvergleich)

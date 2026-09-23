@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.marc.rewe-api</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Library/Frameworks/Python.framework/Versions/3.12/bin/python3</string>
+        <string>/Users/marc/Library/Application Support/Rewe/rewe_api.py</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>REWE_API_PORT</key>
+        <string>7332</string>
+        <key>REWE_API_ALLOWED_ORIGINS</key>
+        <string>http://127.0.0.1:4173,http://localhost:4173,http://127.0.0.1:3000,http://localhost:3000</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>StandardOutPath</key>
+    <string>/Users/marc/Library/Logs/rewe-api.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/marc/Library/Logs/rewe-api-error.log</string>
+</dict>
+</plist>

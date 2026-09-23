@@ -1,0 +1,10 @@
+Options -Indexes
+DirectoryIndex dashboard.php
+
+RewriteEngine On
+RewriteCond %{HTTPS} !=on
+RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [R=301,L]
+
+<FilesMatch "^(?:\.ht|auth\.php|index\.html|groups\.json|categories_override\.json)$|\.(?:db|py|eml)$">
+    Require all denied
+</FilesMatch>

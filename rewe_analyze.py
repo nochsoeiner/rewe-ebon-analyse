@@ -163,15 +163,17 @@ BONUS_EARNED_RE = re.compile(r'hast du (\d+,\d{2}) EUR')
 BONUS_BAL_RE    = re.compile(r'Aktuelles Bonus-Guthaben: (\d+,\d{2}) EUR')
 
 # ── Shop-Rechnung (Lieferservice) Patterns ────────────────────────────────────
-SHOP_ORDER_RE        = re.compile(r'Bestellnummer:\s*(B-[A-Z0-9]+-[A-Z0-9]+-[A-Z0-9]+)')
-SHOP_DATE_RE         = re.compile(r'Rechnungsdatum:\s*(\d{2})\.(\d{2})\.(\d{4})')
-SHOP_TOTAL_RE        = re.compile(r'^Summe\s+([\d.,]+)\s*€', re.MULTILINE)
-SHOP_BONUS_EARNED_RE = re.compile(r'Gesammeltes Bonus-Guthaben:\s*([\d,]+)\s*€')
+SHOP_ORDER_RE        = re.compile(r'Bestellnummer:?\s*(B-[A-Z0-9]+-[A-Z0-9]+-[A-Z0-9]+)')
+SHOP_DATE_RE         = re.compile(r'Rechnungsdatum:?\s*(\d{2})\.(\d{2})\.(\d{4})')
+SHOP_TOTAL_RE        = re.compile(r'^(?:Summe|Gesamtsumme)\s+([\d.,]+)\s*€', re.MULTILINE)
+SHOP_BONUS_EARNED_RE = re.compile(r'Gesammeltes Bonus-Guthaben:\s*(?:\+\s*)?([\d,]+)\s*€')
 SHOP_BONUS_BAL_RE    = re.compile(r'aktuelles Guthaben beträgt\s+([\d,]+)\s*€')
 SHOP_ITEM_RE         = re.compile(
-    r'^(.+?)\s+(-?\d+)\s+([AB](?:/[AB])?)\s+(\d+,\d{2})\s*€\s+(-?\d+,\d{2})\s*€\s*\*?\s*$'
+    r'^(.+?)\s+(-?\d+(?:g)?)\s+([AB](?:/[AB])?)\s+'
+    r'(\d+,\d{2})\s*€(?:/kg)?\s+(-?\d+,\d{2})\s*€\s*\*?\s*$'
 )
-SHOP_HEADER_RE       = re.compile(r'^Bezeichnung\s+Menge\s+MwSt')
+SHOP_HEADER_RE       = re.compile(r'^(?:Bezeichnung|Produkt)\s+Menge\s+MwSt\.?')
+SHOP_FOOTER_RE       = re.compile(r'^REWE Markt GmbH(?:\s|$)')
 
 
 def price_to_float(s: str) -> float:
@@ -318,11 +320,21 @@ def parse_shop_receipt(text: str):
         stripped = line.strip()
 
         if SHOP_HEADER_RE.match(stripped):
+            if pending_item:
+                receipt['items'].append(pending_item)
+                pending_item = None
             in_items = True
             continue
 
         if in_items and SHOP_TOTAL_RE.match(stripped):
             break
+
+        if in_items and SHOP_FOOTER_RE.match(stripped):
+            if pending_item:
+                receipt['items'].append(pending_item)
+                pending_item = None
+            in_items = False
+            continue
 
         if not in_items:
             continue
@@ -332,7 +344,11 @@ def parse_shop_receipt(text: str):
             if pending_item:
                 receipt['items'].append(pending_item)
             name = item_m.group(1).strip()
-            qty = int(item_m.group(2))
+            qty_raw = item_m.group(2)
+            # Gewichtsartikel weisen die tatsächlichen Gramm in der Mengenspalte
+            # aus. Im Datenmodell bleiben sie eine Position; der Einzelpreis ist
+            # weiterhin der im PDF angegebene Kilopreis.
+            qty = 1 if qty_raw.endswith('g') else int(qty_raw)
             tax = item_m.group(3)
             unit_price = price_to_float(item_m.group(4))
             total_price = price_to_float(item_m.group(5))
@@ -1470,6 +1486,40 @@ input:focus{{outline:2px solid #cc000066;border-color:#cc0000}}
 #items-count{{font-size:.82rem;color:#888;margin-bottom:.5rem}}
 .pdf-link{{display:inline-flex;align-items:center;gap:.2rem;font-size:.82rem}}
 footer{{text-align:center;padding:2rem;color:#aaa;font-size:.78rem}}
+/* ── PDF Export ─────────────────────────────────────────────────────── */
+nav{{display:flex;align-items:center;overflow-x:auto}}
+.pdf-btn{{margin-left:auto;padding:.8rem 1.2rem;background:none;border:none;
+  font-size:.9rem;cursor:pointer;color:#cc0000;font-weight:600;white-space:nowrap;flex-shrink:0}}
+.pdf-btn:hover{{background:#fff5f5}}
+.pdf-overlay{{position:fixed;top:0;left:0;width:100%;height:100%;
+  background:rgba(0,0,0,.5);z-index:9999;display:flex;align-items:center;justify-content:center;
+  opacity:0;pointer-events:none;transition:.2s}}
+.pdf-overlay.open{{opacity:1;pointer-events:all}}
+.pdf-modal{{background:#fff;border-radius:14px;padding:1.8rem;max-width:400px;width:90%;
+  box-shadow:0 8px 32px rgba(0,0,0,.25)}}
+.pdf-modal h3{{color:#cc0000;margin-bottom:1rem;font-size:1.05rem}}
+.pdf-page-list{{display:flex;flex-direction:column;gap:.4rem;margin-bottom:1.2rem}}
+.pdf-page-item{{display:flex;align-items:center;gap:.7rem;padding:.5rem .7rem;
+  border-radius:8px;border:1px solid #eee;cursor:pointer;transition:.15s}}
+.pdf-page-item:hover{{background:#fff5f5;border-color:#cc0000}}
+.pdf-page-item input[type=checkbox]{{accent-color:#cc0000;width:1.05rem;height:1.05rem;cursor:pointer;flex-shrink:0}}
+.pdf-page-item span{{font-size:.92rem;flex:1;cursor:pointer}}
+.pdf-sel-row{{display:flex;gap:1rem;margin-bottom:.6rem;font-size:.82rem}}
+.pdf-sel-row a{{color:#cc0000;cursor:pointer;text-decoration:underline}}
+.pdf-actions{{display:flex;gap:.7rem;justify-content:flex-end}}
+.pdf-cancel{{background:#f5f5f5;border:1px solid #ddd;border-radius:8px;
+  padding:.5rem 1.2rem;cursor:pointer;font-size:.9rem}}
+.pdf-cancel:hover{{background:#eee}}
+.pdf-confirm{{background:#cc0000;color:#fff;border:none;border-radius:8px;
+  padding:.5rem 1.4rem;cursor:pointer;font-size:.9rem;font-weight:600}}
+.pdf-confirm:hover{{background:#aa0000}}
+@media print{{
+  #pdf-modal,nav .pdf-btn{{display:none!important}}
+  body.printing header,body.printing nav,body.printing footer{{display:none!important}}
+  body.printing .page{{display:none!important}}
+  body.printing .page.print-visible{{display:block!important}}
+  body.printing .page.print-visible:not(:last-child){{page-break-after:always}}
+}}
 </style>
 </head>
 <body>
@@ -1489,7 +1539,32 @@ footer{{text-align:center;padding:2rem;color:#aaa;font-size:.78rem}}
   <button onclick="showTab('verbrauch')">Verbrauch</button>
   <button onclick="showTab('gruppen')">Artikel-Gruppen</button>
   <button onclick="showTab('extras')">Extras</button>
+  <button class="pdf-btn" onclick="openPdfModal()">⬇ PDF</button>
 </nav>
+
+<div id="pdf-modal" class="pdf-overlay" onclick="if(event.target===this)closePdfModal()">
+  <div class="pdf-modal">
+    <h3>📄 Seiten für PDF-Export auswählen</h3>
+    <div class="pdf-sel-row">
+      <a onclick="setPdfAll(true)">Alle auswählen</a>
+      <a onclick="setPdfAll(false)">Keine</a>
+    </div>
+    <div class="pdf-page-list">
+      <label class="pdf-page-item"><input type="checkbox" class="pdf-pg" value="dashboard" checked><span>Dashboard</span></label>
+      <label class="pdf-page-item"><input type="checkbox" class="pdf-pg" value="trends" checked><span>Preisentwicklung</span></label>
+      <label class="pdf-page-item"><input type="checkbox" class="pdf-pg" value="shopping" checked><span>🛒 Einkaufszettel</span></label>
+      <label class="pdf-page-item"><input type="checkbox" class="pdf-pg" value="positions" checked><span>Alle Positionen</span></label>
+      <label class="pdf-page-item"><input type="checkbox" class="pdf-pg" value="receipts" checked><span>Alle Belege</span></label>
+      <label class="pdf-page-item"><input type="checkbox" class="pdf-pg" value="verbrauch" checked><span>Verbrauch</span></label>
+      <label class="pdf-page-item"><input type="checkbox" class="pdf-pg" value="gruppen" checked><span>Artikel-Gruppen</span></label>
+      <label class="pdf-page-item"><input type="checkbox" class="pdf-pg" value="extras" checked><span>Extras</span></label>
+    </div>
+    <div class="pdf-actions">
+      <button class="pdf-cancel" onclick="closePdfModal()">Abbrechen</button>
+      <button class="pdf-confirm" onclick="doPdfExport()">PDF erstellen</button>
+    </div>
+  </div>
+</div>
 
 <!-- ═══════════════════════════════════════════ DASHBOARD ═══ -->
 <div id="page-dashboard" class="page active">
@@ -1952,6 +2027,8 @@ footer{{text-align:center;padding:2rem;color:#aaa;font-size:.78rem}}
 <footer>REWE eBon Analyse &bull; {stats[0]} Kassenbons &bull; {len(all_items)} Positionen</footer>
 
 <script>
+// Deutsche Zahlenformate in allen Diagrammen (Achsen, Tooltips): 1.234,5
+if (window.Chart) Chart.defaults.locale = 'de-DE';
 // ── Daten ──────────────────────────────────────────────────────────────────
 const MONTHS          = {price_months_js};
 const PRICE_DATA      = {price_data_js};
@@ -1999,6 +2076,51 @@ function showTab(id) {{
   if (id === 'verbrauch' && !window._verbrauchInit) initVerbrauch();
   if (id === 'gruppen'   && !window._gruppenInit)   initGruppen();
   if (id === 'extras'    && !window._extrasInit) initExtras();
+}}
+
+// ── PDF Export ──────────────────────────────────────────────────────────────
+function openPdfModal() {{
+  document.getElementById('pdf-modal').classList.add('open');
+}}
+function closePdfModal() {{
+  document.getElementById('pdf-modal').classList.remove('open');
+}}
+function setPdfAll(checked) {{
+  document.querySelectorAll('.pdf-pg').forEach(c => c.checked = checked);
+}}
+function doPdfExport() {{
+  const selected = Array.from(document.querySelectorAll('.pdf-pg:checked')).map(c => c.value);
+  if (!selected.length) {{ alert('Bitte mindestens eine Seite auswählen.'); return; }}
+  closePdfModal();
+
+  const lazyInit = {{
+    trends:   () => {{ if (!window._trendInit)    initTrends(); }},
+    shopping: () => {{ if (!window._slInit)        initShopping(); }},
+    positions:() => {{ if (!window._posInit)       initPositions(); }},
+    receipts: () => {{ if (!window._recInit)       initReceipts(); }},
+    verbrauch:() => {{ if (!window._verbrauchInit) initVerbrauch(); }},
+    gruppen:  () => {{ if (!window._gruppenInit)   initGruppen(); }},
+    extras:   () => {{ if (!window._extrasInit)    initExtras(); }},
+  }};
+
+  selected.forEach(id => {{
+    const page = document.getElementById('page-' + id);
+    if (!page) return;
+    page.classList.add('active');
+    if (lazyInit[id]) lazyInit[id]();
+    page.classList.remove('active');
+    page.classList.add('print-visible');
+  }});
+
+  document.body.classList.add('printing');
+
+  window.addEventListener('afterprint', function cleanup() {{
+    document.querySelectorAll('.print-visible').forEach(p => p.classList.remove('print-visible'));
+    document.body.classList.remove('printing');
+    window.removeEventListener('afterprint', cleanup);
+  }});
+
+  setTimeout(() => window.print(), 250);
 }}
 
 // ── Universelle Tabellensortierung ──────────────────────────────────────────
@@ -2418,7 +2540,7 @@ function applyPositions() {{
   const body = document.getElementById('pos-body');
   document.getElementById('items-count').textContent = items.length + ' Positionen';
   body.innerHTML = items.map(r => {{
-    const pdfPath = 'pdfs/' + r.src.replace('.eml', '.pdf');
+    const pdfPath = receiptPdfUrl(r.src);
     return `<tr>
       <td class="num">${{isoDE(r.d)}}</td>
       <td>${{r.n}}</td>
@@ -2433,6 +2555,11 @@ function applyPositions() {{
 }}
 
 function filterPositions() {{ applyPositions(); }}
+
+function receiptPdfUrl(source) {{
+  const filename = String(source || '').replace(/\.eml$/i, '.pdf');
+  return 'receipt-pdf.php?file=' + encodeURIComponent(filename);
+}}
 
 // ── Kategorie-Override ───────────────────────────────────────────────────────
 function effCat(name, cat) {{ return CAT_OVERRIDE[name] || cat; }}
@@ -2503,7 +2630,7 @@ function renderReceipts(list) {{
       <td class="num"><strong>${{eur(r.total)}}</strong></td>
       <td class="num"><span class="badge">${{r.itemCnt}}</span></td>
       <td class="num" style="color:#2a9d8f;font-size:.85rem">${{r.bonus != null ? '+ ' + eur(r.bonus) : '–'}}</td>
-      <td><a href="${{r.pdf}}" target="_blank" onclick="event.stopPropagation()" class="pdf-link">📄 PDF</a></td>
+      <td><a href="${{receiptPdfUrl(r.src)}}" target="_blank" onclick="event.stopPropagation()" class="pdf-link">📄 PDF</a></td>
     </tr>`);
   }});
   body.innerHTML = rows.join('');

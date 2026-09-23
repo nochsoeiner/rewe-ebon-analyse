@@ -31,7 +31,7 @@ Diese Version bringt zahlreiche neue Funktionen und einen aufgeräumten Tab-Aufb
 - 🗂 **Alle Positionen** – Suchbar & sortierbar; Kategorie pro Artikel klickbar änderbar; €/kg für Gewichtsartikel; Menge in Gramm
 - 🧾 **Alle Belege** – Aufklappbar mit Detailansicht, direkter PDF-Link
 - 🏷 **Artikel-Gruppen** – Ähnliche Artikel zusammenfassen (z. B. alle Bananen-Varianten), direkt im Browser editierbar; Gruppierungen wirken auf Dashboard, Verbrauch und Warenkorbanalyse
-- 🤖 **Automatischer Mail-Import** – Neue eBon in Apple Mail → EML wird automatisch exportiert und verarbeitet (via launchd + AppleScript)
+- 🤖 **Automatischer Mail-Import** – Neue eBons aus dem Ordner „Rewe“ und Lieferdienst-Rechnungen aus dem Posteingang werden automatisch exportiert und verarbeitet (via launchd + AppleScript)
 
 ## Voraussetzungen
 
