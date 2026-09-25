@@ -26,7 +26,7 @@ from urllib.parse import quote, urlsplit
 
 HOST = "127.0.0.1"
 DEFAULT_PORT = 7332
-DEFAULT_DB_PATH = Path("/Users/marc/Library/Application Support/Rewe/rewe_ebons.db")
+DEFAULT_DB_PATH = Path(os.environ.get("REWE_DATA_DIR", Path.home() / "Library/Application Support/Rewe")) / "rewe_ebons.db"
 DEFAULT_PDF_DIR = Path("/Users/marc/Library/Application Support/Rewe/pdfs")
 DEFAULT_ALLOWED_ORIGINS = (
     "http://127.0.0.1:4173",

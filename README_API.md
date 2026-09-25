@@ -13,12 +13,8 @@ Direkt aus dem Quellordner:
   "/Users/marc/Server/Lieferanten Portal 7340/REWE 7332/rewe_api.py"
 ```
 
-Oder mit der bereitgestellten Laufzeitkopie:
-
-```sh
-/Library/Frameworks/Python.framework/Versions/3.12/bin/python3 \
-  "/Users/marc/Library/Application Support/Rewe/rewe_api.py"
-```
+Dauerbetrieb: `./install.sh` richtet `com.marc.rewe-api` (sowie Aktualisierung und Veröffentlichung der
+Online-Fassung) ein; Daten liegen in `~/Library/Application Support/Rewe` (`REWE_DATA_DIR`).
 
 Standardmäßig lauscht die API nur auf `127.0.0.1:7332`. Die Bind-Adresse ist absichtlich nicht konfigurierbar, damit der Dienst niemals versehentlich auf `0.0.0.0` veröffentlicht wird. Beenden mit `Ctrl-C`.
 

@@ -25,7 +25,7 @@ def prepare(root: Path) -> int:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
+    parser.add_argument("--root", type=Path, default=Path(os.environ.get("REWE_DATA_DIR", Path.home() / "Library/Application Support/Rewe")))
     args = parser.parse_args()
     copied = prepare(args.root.resolve())
     print(f"Web-PDFs vorbereitet: {copied} kopiert")

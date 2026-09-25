@@ -7,6 +7,7 @@ Extrahiert PDFs aus EML-Dateien, parst Kassenbons und erstellt einen HTML-Analys
 import email
 import io
 import json
+import os
 import re
 import shutil
 import socket
@@ -25,11 +26,12 @@ except ImportError:
     print("Installiere pdfplumber: pip3 install pdfplumber")
     sys.exit(1)
 
-SCRIPT_DIR  = Path(__file__).parent
-IMPORT_DIR  = SCRIPT_DIR / "import"     # EML-Dateien hier ablegen
-PDF_DIR     = SCRIPT_DIR / "pdfs"       # auto-extrahierte PDFs
-DB_PATH     = SCRIPT_DIR / "rewe_ebons.db"
-REPORT_PATH = SCRIPT_DIR / "rewe_report.html"
+# Code liegt im Repo, Daten (Mails, PDFs, DB, Bericht, Gruppen) in REWE_DATA_DIR
+DATA_DIR    = Path(os.environ.get("REWE_DATA_DIR", Path.home() / "Library/Application Support/Rewe"))
+IMPORT_DIR  = DATA_DIR / "import"       # EML-Dateien hier ablegen
+PDF_DIR     = DATA_DIR / "pdfs"         # auto-extrahierte PDFs
+DB_PATH     = DATA_DIR / "rewe_ebons.db"
+REPORT_PATH = DATA_DIR / "rewe_report.html"
 
 # ── Kategorien (Keyword-Matching, erster Treffer gewinnt) ──────────────────────
 CATEGORIES = {
@@ -656,7 +658,7 @@ def generate_report(conn: sqlite3.Connection):
     from collections import defaultdict
 
     # ── Gruppen laden (groups.json) ──────────────────────────────────────────
-    _groups_file = SCRIPT_DIR / 'groups.json'
+    _groups_file = DATA_DIR / 'groups.json'
     _groups = {}      # canonical -> [alias, alias, ...]
     _grp_map = {}     # alias -> canonical
     if _groups_file.exists():
@@ -670,7 +672,7 @@ def generate_report(conn: sqlite3.Connection):
     def _grp(name): return _grp_map.get(name, name)
 
     # ── Kategorie-Überschreibungen laden (categories_override.json) ──────────
-    _cat_override_file = SCRIPT_DIR / 'categories_override.json'
+    _cat_override_file = DATA_DIR / 'categories_override.json'
     _cat_override = {}
     if _cat_override_file.exists():
         try:
@@ -3493,7 +3495,7 @@ class _GroupsHandler(BaseHTTPRequestHandler):
         if self.path == '/save-groups':
             try:
                 groups = json.loads(body)
-                (SCRIPT_DIR / 'groups.json').write_text(
+                (DATA_DIR / 'groups.json').write_text(
                     json.dumps(groups, ensure_ascii=False, indent=2), 'utf-8')
                 self.send_response(200); self._cors()
                 self.send_header('Content-Type', 'application/json')
@@ -3506,7 +3508,7 @@ class _GroupsHandler(BaseHTTPRequestHandler):
         elif self.path == '/save-cat-override':
             try:
                 overrides = json.loads(body)
-                (SCRIPT_DIR / 'categories_override.json').write_text(
+                (DATA_DIR / 'categories_override.json').write_text(
                     json.dumps(overrides, ensure_ascii=False, indent=2), 'utf-8')
                 self.send_response(200); self._cors()
                 self.send_header('Content-Type', 'application/json')

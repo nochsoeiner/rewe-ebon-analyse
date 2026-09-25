@@ -4,14 +4,15 @@
 from __future__ import annotations
 
 import html
+import os
 import sqlite3
 from datetime import datetime
 from pathlib import Path
 
 
-PROJECT_DIR = Path(__file__).resolve().parents[1]
-DB_PATH = PROJECT_DIR / "rewe_ebons.db"
-OUTPUT_PATH = PROJECT_DIR / "web" / "last" / "index.php"
+DATA_DIR = Path(os.environ.get("REWE_DATA_DIR", Path.home() / "Library/Application Support/Rewe"))
+DB_PATH = DATA_DIR / "rewe_ebons.db"
+OUTPUT_PATH = DATA_DIR / "web" / "last" / "index.php"
 RECEIPT_LIMIT = 25
 
 
