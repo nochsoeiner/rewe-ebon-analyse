@@ -3,7 +3,7 @@
 # Exportiert neue eBons aus dem Mail.app-Ordner "Rewe" sowie neue
 # Lieferdienst-Rechnungen aus den Posteingängen als EML-Dateien.
 
-IMPORT_DIR="/Users/marc/Server/Lieferanten-Apps/Rewe/import"
+IMPORT_DIR="/Users/marc/Server/Lieferanten Portal 7340/REWE 7332/import"
 LOG="/tmp/rewe_mail_export.log"
 ID_FILE="$IMPORT_DIR/.exported_ids"
 

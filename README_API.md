@@ -10,7 +10,7 @@ Direkt aus dem Quellordner:
 
 ```sh
 /Library/Frameworks/Python.framework/Versions/3.12/bin/python3 \
-  "/Users/marc/Server/Lieferanten-Apps/Rewe/rewe_api.py"
+  "/Users/marc/Server/Lieferanten Portal 7340/REWE 7332/rewe_api.py"
 ```
 
 Oder mit der bereitgestellten Laufzeitkopie:
@@ -70,7 +70,7 @@ Der Browser des Haushalts-Dashboards kann die Daten beispielsweise von `http://1
 Die Tests arbeiten ausschließlich mit einer temporären Datenbank und verändern die echte REWE-Datenbank nicht:
 
 ```sh
-cd "/Users/marc/Server/Lieferanten-Apps/Rewe"
+cd "/Users/marc/Server/Lieferanten Portal 7340/REWE 7332"
 /Library/Frameworks/Python.framework/Versions/3.12/bin/python3 -m unittest -v tests.test_rewe_api
 ```
 
