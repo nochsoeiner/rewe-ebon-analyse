@@ -1569,6 +1569,7 @@ nav{{display:flex;align-items:center;overflow-x:auto}}
 <!-- ═══════════════════════════════════════════ DASHBOARD ═══ -->
 <div id="page-dashboard" class="page active">
 <div class="container">
+  <div data-abruf="rewe"></div>
   <div class="stats-grid">
     <div class="stat"><div class="val">{stats[0]}</div><div class="lbl">Einkäufe</div></div>
     <div class="stat"><div class="val">{feur(stats[1])}</div><div class="lbl">Gesamtausgaben</div></div>
@@ -2026,6 +2027,7 @@ nav{{display:flex;align-items:center;overflow-x:auto}}
 
 <footer>REWE eBon Analyse &bull; {stats[0]} Kassenbons &bull; {len(all_items)} Positionen</footer>
 
+<script src="/ui.js"></script>   <!-- Abruf-Anzeige; nur über das Portal verfügbar -->
 <script>
 // Deutsche Zahlenformate in allen Diagrammen (Achsen, Tooltips): 1.234,5
 if (window.Chart) Chart.defaults.locale = 'de-DE';
