@@ -2029,7 +2029,7 @@ nav{{display:flex;align-items:center;overflow-x:auto}}
 
 <footer>REWE eBon Analyse &bull; {stats[0]} Kassenbons &bull; {len(all_items)} Positionen</footer>
 
-<script src="/ui.js"></script>   <!-- Abruf-Anzeige; nur über das Portal verfügbar -->
+<script src="/ui.js"></script>   <!-- Abruf-Anzeige; nur über den Haushalt-Server verfügbar -->
 <script>
 // Deutsche Zahlenformate in allen Diagrammen (Achsen, Tooltips): 1.234,5
 if (window.Chart) Chart.defaults.locale = 'de-DE';
