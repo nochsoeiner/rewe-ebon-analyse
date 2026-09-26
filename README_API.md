@@ -10,7 +10,7 @@ Direkt aus dem Quellordner:
 
 ```sh
 /Library/Frameworks/Python.framework/Versions/3.12/bin/python3 \
-  "/Users/marc/Server/Lieferanten Portal 7340/REWE 7332/rewe_api.py"
+  "/Users/marc/Server/Haushalt 4173/lieferanten/REWE/rewe_api.py"
 ```
 
 Dauerbetrieb: `./install.sh` richtet `com.marc.rewe-api` (sowie Aktualisierung und Veröffentlichung der
@@ -66,7 +66,7 @@ Der Browser des Haushalts-Dashboards kann die Daten beispielsweise von `http://1
 Die Tests arbeiten ausschließlich mit einer temporären Datenbank und verändern die echte REWE-Datenbank nicht:
 
 ```sh
-cd "/Users/marc/Server/Lieferanten Portal 7340/REWE 7332"
+cd "/Users/marc/Server/Haushalt 4173/lieferanten/REWE"
 /Library/Frameworks/Python.framework/Versions/3.12/bin/python3 -m unittest -v tests.test_rewe_api
 ```
 
