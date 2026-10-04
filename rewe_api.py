@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Local, read-only HTTP API for the REWE eBon database.
+"""Local HTTP API for the REWE eBon database.
 
-This process deliberately has no import, mail, upload, migration, or write code.
-It always binds to the IPv4 loopback address and opens SQLite with mode=ro.
+The database stays read-only. Only an explicit POST to shop-check sends purchased
+item names to REWE to compare market prices. This process has no import, mail,
+upload, migration, or database-write code and binds only to IPv4 loopback.
 """
 
 from __future__ import annotations
@@ -21,7 +22,9 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, TypeVar
-from urllib.parse import quote, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
+
+import rewe_shop
 
 
 HOST = "127.0.0.1"
@@ -374,6 +377,23 @@ class ReweRepository:
             raise ReceiptNotFound
         return pdf_path
 
+    def shop_items(self, channel: str) -> dict[str, Any]:
+        config = rewe_shop.CHANNELS[channel]
+        items = self._read(lambda connection: rewe_shop.purchased_items(
+            connection, config["receiptType"], config["receiptMarketId"]))
+        return {"channel": channel, "total": len(items), "items": items}
+
+    def shop_check(self, channel: str, known: dict[str, str] | None = None,
+                   offset: int = 0, limit: int = 25) -> dict[str, Any]:
+        config = rewe_shop.CHANNELS[channel]
+        items = self._read(lambda connection: rewe_shop.purchased_items(
+            connection, config["receiptType"], config["receiptMarketId"]))
+        batch = items[offset:offset + limit]
+        result = rewe_shop.check_items(batch, known, channel=channel)
+        next_offset = offset + len(result["items"])
+        return {**result, "total": len(items), "offset": offset,
+                "nextOffset": next_offset if next_offset < len(items) else None}
+
 
 class ReweApiServer(ThreadingHTTPServer):
     daemon_threads = True
@@ -441,7 +461,7 @@ class ReweApiHandler(BaseHTTPRequestHandler):
     @staticmethod
     def _known_path(path: str) -> bool:
         return (
-            path in {"/api/v1/rewe", "/api/v1/rewe/status"}
+            path in {"/api/v1/rewe", "/api/v1/rewe/status", "/api/v1/rewe/shop-items", "/api/v1/rewe/shop-check"}
             or _RECEIPT_PATH.fullmatch(path) is not None
             or _PDF_PATH.fullmatch(path) is not None
         )
@@ -457,7 +477,7 @@ class ReweApiHandler(BaseHTTPRequestHandler):
         self.send_response(HTTPStatus.NO_CONTENT)
         self.send_header("Content-Length", "0")
         self.send_header("Cache-Control", "no-store")
-        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS" if path == "/api/v1/rewe/shop-check" else "GET, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Accept, Content-Type")
         origin = self.headers.get("Origin")
         if origin:
@@ -477,6 +497,14 @@ class ReweApiHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/v1/rewe":
                 self._send_json(HTTPStatus.OK, self.api_server.repository.all_data())
+                return
+            if path == "/api/v1/rewe/shop-items":
+                values = parse_qs(urlsplit(self.path).query)
+                channel = values.get("channel", [])
+                if len(channel) != 1 or channel[0] not in rewe_shop.CHANNELS:
+                    self._send_error_json(HTTPStatus.BAD_REQUEST, "invalid_channel", "Ungültige Einkaufsart.")
+                    return
+                self._send_json(HTTPStatus.OK, self.api_server.repository.shop_items(channel[0]))
                 return
 
             pdf_match = _PDF_PATH.fullmatch(path)
@@ -522,9 +550,56 @@ class ReweApiHandler(BaseHTTPRequestHandler):
         if not self._origin_allowed():
             self._send_error_json(HTTPStatus.FORBIDDEN, "origin_not_allowed", "Origin nicht erlaubt.")
             return
-        self._send_error_json(HTTPStatus.METHOD_NOT_ALLOWED, "method_not_allowed", "Nur GET ist erlaubt.")
+        self._send_error_json(HTTPStatus.METHOD_NOT_ALLOWED, "method_not_allowed", "Methode nicht erlaubt.")
 
-    do_POST = _method_not_allowed
+    def do_POST(self) -> None:
+        path = urlsplit(self.path).path
+        origin = self.headers.get("Origin")
+        if path != "/api/v1/rewe/shop-check":
+            self._method_not_allowed()
+            return
+        # Requiring an explicit local Origin and JSON blocks cross-site forms
+        # from initiating an eBon-derived search without the user's click.
+        if origin is None or origin not in self.api_server.allowed_origins:
+            self._send_error_json(HTTPStatus.FORBIDDEN, "origin_not_allowed", "Origin nicht erlaubt.")
+            return
+        if self.headers.get("Content-Type", "").split(";")[0].strip().lower() != "application/json":
+            self._send_error_json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "json_required", "JSON ist erforderlich.")
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= 4096:
+                raise ValueError
+            payload = json.loads(self.rfile.read(length))
+            if not isinstance(payload, dict):
+                raise ValueError
+            channel = payload.get("channel", "market")
+            if channel not in rewe_shop.CHANNELS:
+                raise ValueError
+            offset = payload.get("offset", 0)
+            limit = payload.get("limit", 25)
+            if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 25:
+                raise ValueError
+            known = payload.get("known", {})
+            if not isinstance(known, dict) or len(known) > 50 or any(
+                not isinstance(name, str) or len(name) > 120 or
+                not isinstance(product_id, str) or re.fullmatch(r"[0-9]{1,20}", product_id) is None
+                for name, product_id in known.items()
+            ):
+                raise ValueError
+        except (ValueError, TypeError, json.JSONDecodeError):
+            self._send_error_json(HTTPStatus.BAD_REQUEST, "invalid_request", "Ungültige Prüfanfrage.")
+            return
+        try:
+            self._send_json(HTTPStatus.OK, self.api_server.repository.shop_check(channel, known, offset, limit))
+        except DatabaseUnavailable:
+            self._send_error_json(HTTPStatus.SERVICE_UNAVAILABLE, "database_unavailable", "Die REWE-Datenbank ist vorübergehend nicht verfügbar.")
+        except rewe_shop.ShopThrottled:
+            self._send_error_json(HTTPStatus.SERVICE_UNAVAILABLE, "shop_throttled", "REWE begrenzt die Anfragen gerade. Bitte später erneut prüfen.")
+        except (BrokenPipeError, ConnectionResetError):
+            return
+        except Exception:
+            self._send_error_json(HTTPStatus.SERVICE_UNAVAILABLE, "shop_unavailable", "Der REWE-Shop ist vorübergehend nicht erreichbar.")
     do_PUT = _method_not_allowed
     do_PATCH = _method_not_allowed
     do_DELETE = _method_not_allowed

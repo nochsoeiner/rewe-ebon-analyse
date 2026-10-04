@@ -32,6 +32,7 @@ Diese Version bringt zahlreiche neue Funktionen und einen aufgeräumten Tab-Aufb
 - 🧾 **Alle Belege** – Aufklappbar mit Detailansicht, direkter PDF-Link
 - 🏷 **Artikel-Gruppen** – Ähnliche Artikel zusammenfassen (z. B. alle Bananen-Varianten), direkt im Browser editierbar; Gruppierungen wirken auf Dashboard, Verbrauch und Warenkorbanalyse
 - 🤖 **Automatischer Mail-Import** – Neue eBons aus dem Ordner „Rewe“ und Lieferdienst-Rechnungen aus dem Posteingang werden automatisch exportiert und verarbeitet (via launchd + AppleScript)
+- 🏷 **Angebote nach Einkaufsart** – Zwei getrennte Prüfungen für alle gekauften Artikel: eBons des Markts Holzhäuserstr. 110 gegen dessen Abholsortiment und Online-Rechnungen gegen den Lieferservice für PLZ 04299. Auch einmal gekaufte Artikel werden geprüft. Jeder Abgleich startet erst nach Klick, zeigt den Fortschritt und kann abgebrochen werden. Der Marktregalbestand ist daraus nicht ersichtlich.
 
 ## Voraussetzungen
 

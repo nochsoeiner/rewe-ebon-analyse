@@ -14,7 +14,7 @@ import socket
 import sqlite3
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -1376,6 +1376,13 @@ def generate_report(conn: sqlite3.Connection):
     )
     recent_rises_count = len(recent_rises)
 
+    # A failed refresh must not hide the last complete catalogue. The browser
+    # evaluates each offer's end date, including in an older published report.
+    from rewe_shop import load_offer_snapshot
+    offer_snapshot = load_offer_snapshot(DATA_DIR / "rewe_offer_snapshot.json")
+    offer_state_js = Path(__file__).with_name('rewe_offer_state.js').read_text('utf-8')
+    offer_snapshot_js = json.dumps(offer_snapshot, ensure_ascii=False).replace('</', '<\\/')
+
     html = f"""<!DOCTYPE html>
 <html lang="de">
 <head>
@@ -1515,6 +1522,29 @@ nav{{display:flex;align-items:center;overflow-x:auto}}
 .pdf-confirm{{background:#cc0000;color:#fff;border:none;border-radius:8px;
   padding:.5rem 1.4rem;cursor:pointer;font-size:.9rem;font-weight:600}}
 .pdf-confirm:hover{{background:#aa0000}}
+.market-intro{{color:#555;line-height:1.5;margin-bottom:1rem}}
+.market-actions{{display:flex;align-items:center;gap:.8rem;flex-wrap:wrap;margin-bottom:1rem}}
+.market-action{{border:0;border-radius:8px;background:#cc0000;color:#fff;padding:.7rem 1rem;font:inherit;font-size:.9rem;font-weight:600;cursor:pointer}}
+.market-action:disabled{{opacity:.55;cursor:wait}}
+.market-status{{color:#666;font-size:.88rem}}
+.market-kpis{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.7rem;margin-bottom:1.4rem}}
+.market-kpis>div{{border:1px solid #eee;border-radius:10px;padding:.8rem;background:#fafafa}}
+.market-kpis strong{{display:block;color:#cc0000;font-size:1.5rem}}
+.market-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:.8rem}}
+.market-card{{display:flex;gap:.8rem;border:1px solid #e7e7e7;border-radius:11px;padding:.8rem;min-width:0}}
+.market-card.offer{{border:2px solid #cc0000}}
+.market-card.expired,.market-card.unconfirmed{{background:#fafafa}}
+.market-card.expired .market-badge,.market-card.unconfirmed .market-badge{{background:#eee;color:#555}}
+.market-card img{{width:54px;height:65px;object-fit:contain;flex:none}}
+.market-card-main{{min-width:0}}
+.market-card b{{display:block;font-size:.93rem}}
+.market-card small{{display:block;color:#666;margin-top:.2rem}}
+.market-price{{font-size:1.15rem;font-weight:700;margin-top:.35rem}}
+.market-price s{{font-size:.83rem;color:#888;font-weight:400;margin-left:.35rem}}
+.market-badge{{display:inline-block;background:#ffe8eb;color:#b40018;border-radius:5px;padding:.12rem .4rem;font-size:.76rem;font-weight:600;margin-top:.3rem}}
+.market-note{{font-size:.82rem;color:#666;margin-top:.8rem}}
+.market-list{{max-height:420px;overflow:auto}}
+.market-list-row{{display:flex;justify-content:space-between;gap:1rem;padding:.5rem .2rem;border-bottom:1px solid #eee;font-size:.87rem}}
 @media print{{
   #pdf-modal,nav .pdf-btn{{display:none!important}}
   body.printing header,body.printing nav,body.printing footer{{display:none!important}}
@@ -1534,6 +1564,8 @@ nav{{display:flex;align-items:center;overflow-x:auto}}
 
 <nav>
   <button class="active" onclick="showTab('dashboard')">Dashboard</button>
+  <button onclick="showTab('market')">🏷 Angebote im Markt</button>
+  <button onclick="showTab('online')">🛒 Angebote im Onlineshop</button>
   <button onclick="showTab('trends')">Preisentwicklung</button>
   <button onclick="showTab('shopping')">🛒 Einkaufszettel</button>
   <button onclick="showTab('positions')">Alle Positionen</button>
@@ -1543,6 +1575,46 @@ nav{{display:flex;align-items:center;overflow-x:auto}}
   <button onclick="showTab('extras')">Extras</button>
   <button class="pdf-btn" onclick="openPdfModal()">⬇ PDF</button>
 </nav>
+
+<div id="page-market" class="page">
+<div class="container">
+  <section>
+    <h2>🏷 Angebote im REWE Markt</h2>
+    <p class="market-intro">Holzhäuserstr. 110 · 04299 Leipzig / Stötteritz. Die aktuellen Angebote aus dem Abholsortiment werden mit <b>allen gekauften Artikeln aus eBons dieses Markts</b> lokal verglichen, auch einmal gekauften. Nur bei der zusätzlichen manuellen Prüfung gehen Artikelnamen an REWE.</p>
+    <div class="market-actions">
+      <button class="market-action" id="market-check" onclick="checkChannelOffers('market')">Alle Marktartikel prüfen</button>
+      <a href="https://www.rewe.de/angebote/leipzig-stoetteritz/4040430/rewe-markt-holzhaeuserstr-110/" target="_blank" rel="noopener noreferrer">Alle Marktangebote bei REWE ↗</a>
+      <span class="market-status" id="market-status">Noch nicht geprüft.</span>
+    </div>
+    <p class="market-note">Die nächtliche Angebotsliste allein zeigt keine Verfügbarkeit. „Nicht verfügbar“ kann erst die zusätzliche Einzelprüfung für einen zuvor eindeutig zugeordneten Artikel melden und bezieht sich nur auf das Abholsortiment, nicht auf den Bestand im Marktregal. Ein Angebot gilt nur für die im REWE-Shop ausgewiesene Variante.</p>
+  </section>
+  <div class="market-kpis" id="market-kpis"></div>
+  <section><h2>Jetzt im Angebot <span id="market-offer-count"></span></h2><div class="market-grid" id="market-offers"></div></section>
+  <section id="market-history-section" hidden><h2>Zuletzt erfasste Angebote <span id="market-history-count"></span></h2><p class="market-note">Diese früheren Treffer bleiben zur Orientierung sichtbar. Der damalige Angebotspreis ist aktuell nicht bestätigt.</p><div class="market-grid" id="market-history"></div></section>
+  <section><h2>Im Abholsortiment nicht verfügbar <span id="market-unavailable-count"></span></h2><div class="market-grid" id="market-unavailable"></div></section>
+  <section><h2>Im Markt gekaufte Artikel</h2><input type="search" id="market-filter" placeholder="Artikel filtern …" oninput="renderMarketOffers('market')"><div class="market-list" id="market-all"></div></section>
+</div>
+</div>
+
+<div id="page-online" class="page">
+<div class="container">
+  <section>
+    <h2>🛒 Angebote im REWE Onlineshop</h2>
+    <p class="market-intro">Lieferservice für PLZ 04299. Die aktuellen Onlineangebote werden mit <b>allen Artikeln aus den Online-Rechnungen</b> lokal verglichen, auch einmal bestellten. Nur bei der zusätzlichen manuellen Prüfung gehen Artikelnamen an REWE.</p>
+    <div class="market-actions">
+      <button class="market-action" id="online-check" onclick="checkChannelOffers('online')">Alle Onlineartikel prüfen</button>
+      <a href="https://www.rewe.de/shop/angebote/" target="_blank" rel="noopener noreferrer">Alle Onlineangebote bei REWE ↗</a>
+      <span class="market-status" id="online-status">Noch nicht geprüft.</span>
+    </div>
+    <p class="market-note">Die nächtliche Angebotsliste allein zeigt keine Verfügbarkeit. Eine manuelle Prüfung bezieht sich auf den Lieferservice in PLZ 04299. Ein Angebot gilt nur für die im Shop ausgewiesene Variante; unklare Rechnungsnamen werden nicht automatisch zugeordnet.</p>
+  </section>
+  <div class="market-kpis" id="online-kpis"></div>
+  <section><h2>Jetzt im Angebot <span id="online-offer-count"></span></h2><div class="market-grid" id="online-offers"></div></section>
+  <section id="online-history-section" hidden><h2>Zuletzt erfasste Angebote <span id="online-history-count"></span></h2><p class="market-note">Diese früheren Treffer bleiben zur Orientierung sichtbar. Der damalige Angebotspreis ist aktuell nicht bestätigt.</p><div class="market-grid" id="online-history"></div></section>
+  <section><h2>Im Onlineshop nicht verfügbar <span id="online-unavailable-count"></span></h2><div class="market-grid" id="online-unavailable"></div></section>
+  <section><h2>Online bestellte Artikel</h2><input type="search" id="online-filter" placeholder="Artikel filtern …" oninput="renderMarketOffers('online')"><div class="market-list" id="online-all"></div></section>
+</div>
+</div>
 
 <div id="pdf-modal" class="pdf-overlay" onclick="if(event.target===this)closePdfModal()">
   <div class="pdf-modal">
@@ -2066,6 +2138,162 @@ const PRICE_ALARM     = {price_alarm_js};
 const PRICE_VOL       = {price_vol_js};
 const SUGGESTIONS     = {suggestions_js};
 const FORECAST        = {forecast_js};
+
+// Markt- und Onlinepreise werden jeweils erst nach dem zugehörigen Klick abgefragt.
+{offer_state_js}
+const OFFER_SNAPSHOT = {offer_snapshot_js};
+const MARKET_CHECK = {{market:null, online:null}};
+const MARKET_SCAN = {{market:null, online:null}};
+const marketEsc = value => String(value ?? '').replace(/[&<>"']/g, c =>
+  ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]));
+const marketEuro = value => typeof value === 'number'
+  ? value.toLocaleString('de-DE', {{style:'currency',currency:'EUR'}}) : '–';
+function marketCard(row) {{
+  const title = marketEsc(row.title || row.name);
+  const historical = row.status === 'expired' || row.status === 'unconfirmed';
+  const endDate = typeof row.validUntil === 'string' ? row.validUntil.slice(0,10).split('-').reverse().join('.') : '';
+  const price = row.price == null ? '' : `${{historical ? '<small>Damals im Angebot:</small>' : ''}}<div class="market-price">${{marketEuro(row.price)}}${{row.regular ? `<s>${{marketEuro(row.regular)}}</s>` : ''}}</div>`;
+  const discount = row.status === 'offer'
+    ? `<span class="market-badge">−${{marketEsc(row.discount || Math.round((1-row.price/row.regular)*100))}} %${{endDate ? ' bis ' + marketEsc(endDate) : ''}}</span>`
+    : historical ? `<span class="market-badge">${{row.status === 'expired' ? 'Abgelaufen am ' + marketEsc(endDate) : 'Gültigkeit nicht bestätigt'}}</span>` : '';
+  const last = row.lastPrice == null ? '' : `<small>Zuletzt bezahlt: ${{marketEuro(row.lastPrice)}} · ${{row.purchases}}× gekauft</small>`;
+  const img = row.image ? `<img src="${{marketEsc(row.image)}}" alt="" loading="lazy">` : '';
+  const link = row.shopUrl ? `<a href="${{marketEsc(row.shopUrl)}}" target="_blank" rel="noopener noreferrer">Im Shop öffnen ↗</a>` : '';
+  return `<div class="market-card ${{row.status === 'offer' || historical ? row.status : ''}}">${{img}}<div class="market-card-main"><b>${{title}}</b>${{price}}${{discount}}${{last}}${{link}}</div></div>`;
+}}
+function renderMarketOffers(channel) {{
+  if (!MARKET_CHECK[channel]) return;
+  const rows = (MARKET_CHECK[channel].items || []).map(row => marketOfferState(row, MARKET_CHECK[channel].checkedAt));
+  const scope = channel === 'market' ? 'Abholsortiment' : 'Onlineshop';
+  const offers = rows.filter(row => row.status === 'offer');
+  const historical = rows.filter(row => row.status === 'expired' || row.status === 'unconfirmed');
+  const unavailable = rows.filter(row => row.status === 'unavailable');
+  const unmapped = rows.filter(row => row.status === 'unmapped');
+  const errors = rows.filter(row => row.status === 'error');
+  const pending = rows.filter(row => row.status === 'pending');
+  document.getElementById(channel + '-offer-count').textContent = `(${{offers.length}})`;
+  document.getElementById(channel + '-unavailable-count').textContent = `(${{unavailable.length}})`;
+  document.getElementById(channel + '-kpis').innerHTML = `
+    <div><strong>${{offers.length}}</strong>Artikel im Angebot</div>
+    <div><strong>${{historical.length}}</strong>frühere Angebotstreffer</div>
+    <div><strong>${{rows.filter(row => row.status === 'available' || row.status === 'offer').length}}</strong>bei REWE gelistet</div>
+    <div><strong>${{unavailable.length}}</strong>derzeit nicht gelistet</div>
+    <div><strong>${{unmapped.length}}</strong>ohne sicheren Treffer</div>
+    <div><strong>${{errors.length}}</strong>Prüfung fehlgeschlagen</div>
+    <div><strong>${{pending.length}}</strong>noch nicht geprüft</div>`;
+  document.getElementById(channel + '-offers').innerHTML = offers.map(marketCard).join('') || (historical.length
+    ? '<p>Die Gültigkeit der früheren Treffer ist abgelaufen oder nicht bestätigt. Der letzte Stand bleibt unten sichtbar.</p>'
+    : '<p>Unter den sicher zugeordneten Artikeln ist gerade kein Angebot.</p>');
+  document.getElementById(channel + '-history-section').hidden = historical.length === 0;
+  document.getElementById(channel + '-history-count').textContent = `(${{historical.length}})`;
+  document.getElementById(channel + '-history').innerHTML = historical.map(marketCard).join('');
+  document.getElementById(channel + '-unavailable').innerHTML = unavailable.map(marketCard).join('') || `<p>Kein zuvor zugeordneter Artikel ist im ${{scope}} verschwunden.</p>`;
+  const query = document.getElementById(channel + '-filter').value.toLocaleLowerCase('de-DE');
+  document.getElementById(channel + '-all').innerHTML = rows.filter(row => row.name.toLocaleLowerCase('de-DE').includes(query)).map(row =>
+    `<div class="market-list-row"><span>${{marketEsc(row.name)}} <small>${{row.purchases}}× gekauft</small></span><span>${{row.status === 'offer' ? '🏷 Angebot' : row.status === 'expired' ? 'Früheres Angebot · abgelaufen' : row.status === 'unconfirmed' ? 'Früheres Angebot · Gültigkeit unbestätigt' : row.status === 'available' ? marketEuro(row.price) : row.status === 'unavailable' ? `Im ${{scope}} nicht gelistet` : row.status === 'error' ? 'Prüfung fehlgeschlagen' : row.status === 'pending' ? 'Noch nicht geprüft' : 'Nicht sicher zugeordnet'}}</span></div>`
+  ).join('');
+}}
+async function checkChannelOffers(channel) {{
+  if (MARKET_SCAN[channel]) {{ MARKET_SCAN[channel].abort(); return; }}
+  const button = document.getElementById(channel + '-check');
+  const status = document.getElementById(channel + '-status');
+  const controller = new AbortController();
+  MARKET_SCAN[channel] = controller;
+  const originalLabel = button.textContent;
+  let nextLabel = originalLabel;
+  button.textContent = 'Prüfung abbrechen';
+  document.getElementById((channel === 'market' ? 'online' : 'market') + '-check').disabled = true;
+  status.textContent = 'Gekaufte Artikel werden geladen …';
+  try {{
+    if (!['127.0.0.1','localhost'].includes(location.hostname)) throw new Error('Die Prüfung ist nur in der lokalen Haushalts-App verfügbar.');
+    let known = {{}};
+    const storageKey = 'rewe-' + channel + '-matches-v1';
+    try {{
+      const saved = JSON.parse(localStorage.getItem(storageKey) || '{{}}');
+      if (saved && typeof saved === 'object' && !Array.isArray(saved)) known = saved;
+    }} catch (_) {{}}
+    const listingResponse = await fetch('/api/v1/rewe/shop-items?channel=' + channel,
+      {{cache:'no-store',signal:controller.signal}});
+    if (!listingResponse.ok) throw new Error(`Artikelliste nicht verfügbar (HTTP ${{listingResponse.status}}).`);
+    const listing = await listingResponse.json();
+    if (listing.channel !== channel || !Array.isArray(listing.items)) throw new Error('Ungültige Artikelliste.');
+    const items = listing.items;
+    const previous = MARKET_CHECK[channel];
+    if (!previous || previous.items.length !== items.length ||
+        previous.items.some((row, index) => row.name !== items[index].name) ||
+        !previous.items.some(row => row.status === 'pending')) {{
+      MARKET_CHECK[channel] = {{channel,items:items.map(row => ({{...row,status:'pending'}}))}};
+    }}
+    renderMarketOffers(channel);
+    if (!items.length) {{ status.textContent = 'Keine gekauften Artikel gefunden.'; return; }}
+    let offset = MARKET_CHECK[channel].items.findIndex(row => row.status === 'pending');
+    for (; offset < items.length; ) {{
+      const knownBatch = {{}};
+      for (const row of items.slice(offset,offset + 25)) {{
+        if (typeof known[row.name] === 'string') knownBatch[row.name] = known[row.name];
+      }}
+      const response = await fetch('/api/v1/rewe/shop-check', {{
+        method:'POST', headers:{{'Content-Type':'application/json'}},
+        body:JSON.stringify({{channel,offset,limit:25,known:knownBatch}}),
+        cache:'no-store',signal:controller.signal
+      }});
+      if (!response.ok) {{
+        const failure = await response.json().catch(() => ({{}}));
+        throw new Error(failure.error?.message || `REWE-Abgleich unterbrochen (HTTP ${{response.status}}).`);
+      }}
+      const batch = await response.json();
+      if (batch.channel !== channel || batch.offset !== offset || batch.total !== items.length ||
+          !Array.isArray(batch.items) || batch.items.length > Math.min(25,items.length - offset) ||
+          (!batch.items.length && !batch.paused))
+        throw new Error('Ungültige Antwort beim Artikelabgleich.');
+      for (let i = 0; i < batch.items.length; i++) {{
+        const row = batch.items[i];
+        MARKET_CHECK[channel].items[offset + i] = row;
+        if (row.productId && row.status !== 'unmapped' && row.status !== 'error') known[row.name] = row.productId;
+      }}
+      try {{ localStorage.setItem(storageKey, JSON.stringify(known)); }} catch (_) {{}}
+      MARKET_CHECK[channel].checkedAt = batch.checkedAt;
+      offset += batch.items.length;
+      status.textContent = `${{offset}} von ${{items.length}} Artikeln geprüft …`;
+      renderMarketOffers(channel);
+      if (batch.paused) {{
+        status.textContent = `REWE pausiert die Abfragen. ${{offset}} von ${{items.length}} geprüft; später hier fortsetzen.`;
+        nextLabel = 'Prüfung fortsetzen';
+        return;
+      }}
+    }}
+    status.textContent = 'Geprüft: ' + new Date(MARKET_CHECK[channel].checkedAt).toLocaleString('de-DE');
+  }} catch (error) {{
+    status.textContent = error.name === 'AbortError' ? 'Prüfung abgebrochen; bisherige Treffer bleiben sichtbar.' :
+      (error.message || 'Prüfung fehlgeschlagen.');
+    if (MARKET_CHECK[channel]?.items.some(row => row.status === 'pending')) nextLabel = 'Prüfung fortsetzen';
+  }} finally {{
+    MARKET_SCAN[channel] = null;
+    button.textContent = nextLabel;
+    document.getElementById((channel === 'market' ? 'online' : 'market') + '-check').disabled = false;
+  }}
+}}
+if (!['127.0.0.1','localhost'].includes(location.hostname)) {{
+  for (const channel of ['market','online']) {{
+    document.getElementById(channel + '-check').disabled = true;
+    document.getElementById(channel + '-status').textContent = OFFER_SNAPSHOT ? '' : 'Noch keine aktuellen Angebote. Nur in der lokalen Haushalts-App prüfbar.';
+  }}
+}}
+if (OFFER_SNAPSHOT) {{
+  for (const channel of ['market','online']) {{
+    const saved = OFFER_SNAPSHOT.channels[channel];
+    MARKET_CHECK[channel] = {{channel,items:saved.items,checkedAt:OFFER_SNAPSHOT.checkedAt}};
+    renderMarketOffers(channel);
+    document.getElementById(channel + '-status').textContent =
+      'Letzter erfolgreicher Abruf: ' + new Date(OFFER_SNAPSHOT.checkedAt).toLocaleString('de-DE') +
+      (Date.now() - new Date(OFFER_SNAPSHOT.checkedAt).getTime() > 30 * 3600 * 1000
+        ? ' · Aktualisierung ausstehend; noch gültige Angebote bleiben sichtbar.' : '') +
+      ' · Verfügbarkeit der übrigen Artikel noch ungeprüft.';
+  }}
+}}
+setInterval(() => {{
+  for (const channel of ['market','online']) renderMarketOffers(channel);
+}}, 60000);
 
 // ── Navigation ─────────────────────────────────────────────────────────────
 function showTab(id) {{

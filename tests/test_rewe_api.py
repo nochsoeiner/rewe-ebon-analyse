@@ -7,6 +7,7 @@ import threading
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 
 from rewe_api import DEFAULT_ALLOWED_ORIGINS, create_server, open_readonly_connection
@@ -182,6 +183,61 @@ class ReweApiTest(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertEqual(payload["error"]["code"], "receipt_not_found")
         self.assertNotIn(str(self.root), json.dumps(payload))
+
+    def test_shop_check_requires_explicit_local_origin_and_json(self):
+        def post(origin=None, content_type="application/json", body=b'{"known":{}}'):
+            connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+            headers = {"Content-Type": content_type}
+            if origin is not None:
+                headers["Origin"] = origin
+            connection.request("POST", "/api/v1/rewe/shop-check", body=body, headers=headers)
+            response = connection.getresponse()
+            status, body = response.status, response.read()
+            connection.close()
+            return status, json.loads(body)
+
+        self.assertEqual(post()[0], 403)
+        self.assertEqual(post("https://other.example")[0], 403)
+        self.assertEqual(post(ALLOWED_ORIGIN, "text/plain")[0], 415)
+        with patch.object(self.server.repository, "shop_check", return_value={"items": []}) as check:
+            status, payload = post(ALLOWED_ORIGIN)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload, {"items": []})
+        check.assert_called_once_with("market", {}, 0, 25)
+        with patch.object(self.server.repository, "shop_check", return_value={"items": []}) as check:
+            self.assertEqual(post(ALLOWED_ORIGIN, body=b'{"channel":"online","known":{}}')[0], 200)
+        check.assert_called_once_with("online", {}, 0, 25)
+        self.assertEqual(post(ALLOWED_ORIGIN, body=b'{"channel":"unknown"}')[0], 400)
+        self.assertEqual(post(ALLOWED_ORIGIN, body=b'{"offset":-1}')[0], 400)
+        self.assertEqual(post(ALLOWED_ORIGIN, body=b'{"limit":26}')[0], 400)
+
+    def test_shop_items_list_is_read_only_and_channel_specific(self):
+        with patch.object(self.server.repository, "shop_items", return_value={"channel":"online","total":0,"items":[]}) as listing:
+            status, _headers, payload = self.json_request("/api/v1/rewe/shop-items?channel=online")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["channel"], "online")
+        listing.assert_called_once_with("online")
+        self.assertEqual(self.json_request("/api/v1/rewe/shop-items?channel=wrong")[0], 400)
+
+    def test_shop_check_returns_one_page_with_progress(self):
+        items = [{"name": f"Artikel {n}", "purchases": 1} for n in range(54)]
+        with patch.object(self.server.repository, "_read", return_value=items), \
+                patch("rewe_api.rewe_shop.check_items", side_effect=lambda batch, known, channel: {"channel":channel,"items":batch}):
+            middle = self.server.repository.shop_check("market", {}, 25, 25)
+            last = self.server.repository.shop_check("market", {}, 50, 25)
+        self.assertEqual([row["name"] for row in middle["items"]], [f"Artikel {n}" for n in range(25, 50)])
+        self.assertEqual((middle["total"], middle["nextOffset"]), (54, 50))
+        self.assertEqual((len(last["items"]), last["nextOffset"]), (4, None))
+
+    def test_shop_check_resumes_after_partial_rate_limited_page(self):
+        items = [{"name": f"Artikel {n}", "purchases": 1} for n in range(3)]
+        with patch.object(self.server.repository, "_read", return_value=items), \
+                patch("rewe_api.rewe_shop.check_items", return_value={
+                    "channel": "market", "items": [items[0]], "paused": True}):
+            page = self.server.repository.shop_check("market", {}, 0, 3)
+        self.assertEqual(page["nextOffset"], 1)
+        self.assertTrue(page["paused"])
+        self.assertEqual(page["items"], [items[0]])
 
     def test_path_traversal_is_not_a_route(self):
         status, _headers, payload = self.json_request(
