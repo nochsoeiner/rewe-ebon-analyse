@@ -2,7 +2,7 @@
 
 `rewe_api.py` stellt die SQLite-Daten der REWE-eBon-App lokal und nur lesend für das Haushalts-Dashboard bereit. Die Marktpreisprüfung ist eine gesonderte, vom Nutzer gestartete Netzabfrage.
 
-Der vorhandene Server auf Port 7331 wurde nicht wiederverwendet: Er gehört zur interaktiven REWE-Auswertung und besitzt bewusst schreibende Endpunkte für Gruppen und Kategorien. Die neue API ist deshalb als eigener, kleiner Dienst getrennt. Sie importiert keine Mails, startet Mail.app nicht und enthält keinerlei Upload-, SSH- oder SCP-Funktion.
+Im regulären Betrieb bindet der gemeinsame Haushalt-Server die REWE-API auf Port 4173 ein. Der optionale Server auf Port 7331 gehört zur interaktiven REWE-Auswertung und besitzt schreibende Endpunkte für Gruppen und Kategorien. Ein separater API-Start auf Port 7332 bleibt für Entwicklung und Tests möglich. Die API selbst importiert keine Mails, startet Mail.app nicht und enthält keinerlei Upload-, SSH- oder SCP-Funktion.
 
 ## Start
 
@@ -40,6 +40,24 @@ Nur explizite Origins auf `localhost`, `127.0.0.1` oder `::1` werden akzeptiert.
 Die Marktpreise und Verfügbarkeitsangaben stammen aus dem **Abholsortiment** des gewählten Markts und sind kein Nachweis für den Regalbestand. Die Onlineangaben stammen aus dem **Lieferservice**. Ein erstmalig nicht gefundener oder mehrdeutiger Artikel wird als „nicht sicher zugeordnet“ angezeigt; „nicht verfügbar“ gilt nur für eine zuvor eindeutig zugeordnete Produkt-ID desselben Einkaufskanals. Die offiziellen REWE-Angebotsseiten sind aus dem Bericht verlinkt. Die manuelle Einzelprüfung funktioniert nur in der lokalen Haushalts-App; die Online-Fassung zeigt den zuletzt erstellten Angebotsstand ohne eigene REWE-Anfragen.
 
 `python3 rewe_offer_refresh.py` lädt die rabattierten Shop-Produkte für beide Kanäle seitenweise (`attribute=discounted`) und gleicht sie lokal mit allen eBons beziehungsweise Online-Rechnungen ab. Die REWE-Anfragen enthalten dabei keine gekauften Artikelnamen. Erst nach vollständigem Abruf beider Angebotslisten wird `rewe_offer_snapshot.json` atomar ersetzt und der HTML-Bericht neu erstellt. Bei fehlgeschlagenem Abruf bleibt der letzte vollständige Snapshot erhalten und wird auch nach 30 Stunden weiter im Bericht eingebettet. Die Anzeige prüft das Gültigkeitsdatum jedes Angebots in der Zeitzone Europe/Berlin; der von REWE angegebene Endtag ist einschließlich gültig. Noch gültige Angebote bleiben sichtbar. Abgelaufene Treffer erscheinen unter „Zuletzt erfasste Angebote“ mit dem damaligen Preis. Angebote ohne auswertbares Enddatum werden nach 30 Stunden dort als „Gültigkeit nicht bestätigt“ angezeigt. Die Prüfung erfolgt auch beim Öffnen eines älteren veröffentlichten Berichts und jede Minute auf einer geöffneten Seite. Nicht angebotene Produkte bleiben bezüglich Verfügbarkeit ungeprüft; die Angebotsliste kann fehlende Artikel nicht nachweisen. Eine bestehende Report-WatchPath-Veröffentlichung übernimmt den neu erstellten Bericht.
+
+## Wöchentlicher Angebotsabruf und mobile Darstellung
+
+Im eingerichteten Betrieb startet die separate Codex-Automation den Abruf jeden
+Sonntag um **18:00 Uhr (Europe/Berlin)** für die kommende Woche ab Montag. Sie
+prüft zusätzlich die Angebotsgültigkeit; ein neuer `checkedAt`-Zeitpunkt allein
+belegt keine Angebote für die Zielwoche. Der Zeitplan liegt außerhalb des
+Repositorys und wird nicht von `install.sh` angelegt. Die stündliche
+Berichtserstellung und die Veröffentlichung sind davon unabhängige Abläufe.
+
+Der Bericht zeigt Angebote mit Produktbild, aktuellem und regulärem Preis,
+Rabatt, Gültigkeit, letztem eigenen Kaufpreis und Kaufanzahl. Eine mobile
+Beispielansicht steht in der [README](README.md#neu-angebote-passend-zu-den-eigenen-einkäufen).
+Bis 600 px bleibt die Navigation unten am Bildschirmrand. Beim Tabwechsel wird
+die Dokumentposition sofort nach oben gesetzt; Tabellen besitzen eigene
+Scrollbereiche und verbreitern die Seite nicht.
+
+## Frische Antworten
 
 Alle Antworten enthalten `Cache-Control: no-store`. JSON und PDF werden bei jedem Aufruf aus der aktuellen Datenbank beziehungsweise dem aktuellen PDF-Ordner ermittelt. Es ist kein Neustart nach einem Mail-Import nötig.
 

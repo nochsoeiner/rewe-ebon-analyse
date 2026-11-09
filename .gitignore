@@ -5,6 +5,8 @@ pdfs_direct/
 rewe_ebons.db
 rewe_ebons_backup_*.db
 rewe_report.html
+rewe_offer_snapshot.json
+rewe_offer_refresh.lock
 rewe_direct.db
 rewe_direct_report.html
 rewe_direct.py

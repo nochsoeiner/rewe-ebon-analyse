@@ -1394,7 +1394,10 @@ def generate_report(conn: sqlite3.Connection):
 *{{box-sizing:border-box;margin:0;padding:0}}
 body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f0f2f5;color:#1a1a2e}}
 a{{color:#cc0000;text-decoration:none}}a:hover{{text-decoration:underline}}
-header{{background:#cc0000;color:#fff;padding:1.2rem 2rem;display:flex;align-items:center;gap:1rem}}
+header{{background:#cc0000;color:#fff;padding:1.2rem 9rem 1.2rem 2rem;display:flex;align-items:center;gap:1rem}}
+header>div{{min-width:0}}
+/* The online publisher inserts this link with inline fixed positioning. */
+body>a[href="/logout.php"]{{position:absolute!important}}
 header h1{{font-size:1.6rem;flex:1}}
 header p{{opacity:.8;font-size:.9rem}}
 nav{{background:#fff;border-bottom:2px solid #cc0000;position:sticky;top:0;z-index:100}}
@@ -1403,13 +1406,13 @@ nav button{{background:none;border:none;padding:.8rem 1.4rem;font-size:.95rem;cu
 nav button.active{{color:#cc0000;border-bottom-color:#cc0000;font-weight:600}}
 .page{{display:none}}.page.active{{display:block}}
 .container{{max-width:1200px;margin:2rem auto;padding:0 1rem}}
-.stats-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:1rem;margin-bottom:2rem}}
-.stat{{background:#fff;border-radius:12px;padding:1.2rem;text-align:center;box-shadow:0 2px 8px #0001}}
-.stat .val{{font-size:1.8rem;font-weight:700;color:#cc0000}}
+.stats-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(170px,100%),1fr));gap:1rem;margin-bottom:2rem}}
+.stat{{background:#fff;border-radius:12px;padding:1.2rem;text-align:center;box-shadow:0 2px 8px #0001;min-width:0;container-type:inline-size}}
+.stat .val{{font-size:clamp(1.1rem,12cqi,1.8rem);font-weight:700;color:#cc0000;overflow-wrap:anywhere}}
 .stat .lbl{{font-size:.8rem;color:#777;margin-top:.3rem}}
-section{{background:#fff;border-radius:12px;padding:1.5rem;box-shadow:0 2px 8px #0001;margin-bottom:1.5rem}}
+section{{background:#fff;border-radius:12px;padding:1.5rem;box-shadow:0 2px 8px #0001;margin-bottom:1.5rem;min-width:0}}
 section h2{{font-size:1.1rem;color:#cc0000;margin-bottom:1rem;border-bottom:2px solid #cc000022;padding-bottom:.4rem}}
-.chart-wrap{{position:relative;height:300px}}
+.chart-wrap{{position:relative;height:300px;min-width:0}}
 table{{width:100%;border-collapse:collapse;font-size:.88rem}}
 th{{background:#cc0000;color:#fff;padding:.55rem .8rem;text-align:left;white-space:nowrap;
     user-select:none}}
@@ -1427,13 +1430,14 @@ tr:hover td{{background:#fff5f5}}
 tr.expandable-row:hover .expand-toggle{{color:#cc0000}}
 .pct-pos{{color:#cc0000;font-weight:600}}
 .pct-neg{{color:#2a9d8f;font-weight:600}}
-.two-col{{display:grid;grid-template-columns:1fr 1fr;gap:1.5rem}}
-@media(max-width:700px){{.two-col{{grid-template-columns:1fr}}}}
+.two-col{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1.5rem}}
+.two-col>*{{min-width:0}}
+@media(max-width:700px){{.two-col{{grid-template-columns:minmax(0,1fr)}}}}
 input[type=text],input[type=search]{{width:100%;padding:.5rem .8rem;border:1px solid #ddd;
   border-radius:6px;font-size:.9rem;margin-bottom:.8rem}}
 input:focus{{outline:2px solid #cc000066;border-color:#cc0000}}
-.scroll{{max-height:420px;overflow-y:auto;scrollbar-width:none;-ms-overflow-style:none}}
-.scroll::-webkit-scrollbar{{display:none}}
+.scroll{{max-height:420px;overflow:auto}}
+.table-scroll{{max-width:100%;overflow-x:auto}}
 .scroll thead th{{position:sticky;top:0;z-index:1;box-shadow:0 2px 0 #aa0000}}
 .badge{{display:inline-block;background:#cc000015;color:#cc0000;border-radius:4px;
         padding:.1rem .45rem;font-size:.78rem;font-weight:600}}
@@ -1497,6 +1501,7 @@ input:focus{{outline:2px solid #cc000066;border-color:#cc0000}}
 footer{{text-align:center;padding:2rem;color:#aaa;font-size:.78rem}}
 /* ── PDF Export ─────────────────────────────────────────────────────── */
 nav{{display:flex;align-items:center;overflow-x:auto}}
+nav button{{flex-shrink:0;white-space:nowrap}}
 .pdf-btn{{margin-left:auto;padding:.8rem 1.2rem;background:none;border:none;
   font-size:.9rem;cursor:pointer;color:#cc0000;font-weight:600;white-space:nowrap;flex-shrink:0}}
 .pdf-btn:hover{{background:#fff5f5}}
@@ -1545,6 +1550,22 @@ nav{{display:flex;align-items:center;overflow-x:auto}}
 .market-note{{font-size:.82rem;color:#666;margin-top:.8rem}}
 .market-list{{max-height:420px;overflow:auto}}
 .market-list-row{{display:flex;justify-content:space-between;gap:1rem;padding:.5rem .2rem;border-bottom:1px solid #eee;font-size:.87rem}}
+@media(max-width:600px){{
+  body{{padding-bottom:calc(4rem + env(safe-area-inset-bottom,0px))}}
+  header{{padding:3.5rem 1rem 1rem}}
+  header h1{{font-size:1.35rem;line-height:1.3}}
+  header p{{font-size:.8rem;line-height:1.5;margin-top:.3rem}}
+  nav{{position:fixed;top:auto;bottom:0;left:0;right:0;border-top:2px solid #cc0000;border-bottom:0;
+       padding-bottom:env(safe-area-inset-bottom,0px);box-shadow:0 -3px 12px #0001}}
+  nav button{{padding:.8rem 1rem;font-size:.88rem;min-height:3.5rem}}
+  .container{{margin:1rem auto;padding:0 .75rem}}
+  .stats-grid{{grid-template-columns:repeat(2,minmax(0,1fr));gap:.75rem;margin-bottom:1rem}}
+  .stat{{padding:1rem .75rem}}
+  section{{padding:1rem;margin-bottom:1rem}}
+  section h2{{font-size:1rem;line-height:1.4}}
+  .two-col{{gap:0}}
+  .forecast-progress{{flex-wrap:wrap;gap:.3rem .75rem}}
+}}
 @media print{{
   #pdf-modal,nav .pdf-btn{{display:none!important}}
   body.printing header,body.printing nav,body.printing footer{{display:none!important}}
@@ -1668,10 +1689,12 @@ nav{{display:flex;align-items:center;overflow-x:auto}}
     </section>
     <section>
       <h2>Jahresübersicht</h2>
+      <div class="table-scroll" role="region" aria-label="Jahresübersicht" tabindex="0">
       <table>
         <thead>{tr(['Jahr','Einkäufe','Gesamt','Ø/Einkauf'],'th')}</thead>
         <tbody>{yearly_rows}</tbody>
       </table>
+      </div>
     </section>
   </div>
 
@@ -1703,10 +1726,12 @@ nav{{display:flex;align-items:center;overflow-x:auto}}
     </section>
     <section>
       <h2>Wochentag-Details</h2>
+      <div class="table-scroll" role="region" aria-label="Wochentag-Details" tabindex="0">
       <table>
         <thead>{tr(['Tag','Einkäufe','Ø Betrag','Gesamt'],'th')}</thead>
         <tbody>{weekday_rows}</tbody>
       </table>
+      </div>
     </section>
   </div>
 
@@ -2308,6 +2333,7 @@ function showTab(id) {{
   if (id === 'verbrauch' && !window._verbrauchInit) initVerbrauch();
   if (id === 'gruppen'   && !window._gruppenInit)   initGruppen();
   if (id === 'extras'    && !window._extrasInit) initExtras();
+  window.scrollTo({{top:0,left:0,behavior:'instant'}});
 }}
 
 // ── PDF Export ──────────────────────────────────────────────────────────────
@@ -3539,7 +3565,7 @@ function renderForecast() {{
         <div class="lbl">Hochrechnung vs. Ø</div></div>
     </div>
     <div style="background:#f0f2f5;border-radius:8px;padding:.8rem;font-size:.85rem;color:#666">
-      <div style="display:flex;justify-content:space-between;margin-bottom:.5rem">
+      <div class="forecast-progress" style="display:flex;justify-content:space-between;margin-bottom:.5rem">
         <span>${{f.trips}} Einkäufe bisher</span>
         <span>${{pct}} % des Monats vergangen</span>
       </div>

@@ -1,3 +1,10 @@
+> **Historische Anleitung:** Im aktuellen Haushalt-Setup übernimmt der gemeinsame
+> Mail-Export (`com.marc.lieferanten-mail`, Regeln `mail/rules.json`) den Belegabruf.
+> Die folgenden separaten REWE-LaunchAgents und iCloud-Pfade beschreiben einen
+> früheren Stand. Aktueller Betrieb und Datenordner: [README](README.md#daten-und-ordnerstruktur)
+> und [README_API](README_API.md#start). Die sonntägliche Angebotsautomation ist
+> ein eigener Ablauf und kein Mail-Export.
+
 # Rewe Mail Export – Einrichtung
 
 ## Dateien
