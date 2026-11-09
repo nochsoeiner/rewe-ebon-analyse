@@ -69,6 +69,16 @@ oben beschrieben ausgewertet.
 Der Bericht zeigt Angebote mit Produktbild, aktuellem und regulärem Preis,
 Rabatt, Gültigkeit, letztem eigenen Kaufpreis und Kaufanzahl. Eine mobile
 Beispielansicht steht in der [README](README.md#neu-angebote-passend-zu-den-eigenen-einkäufen).
+Mehrere Bon-Bezeichnungen derselben Produkt-ID werden je Kanal bei gleichem
+Status, Preis und Gültigkeitsende zu einer Karte zusammengefasst. Kaufzahlen
+werden addiert; `lastPurchaseDate` und `lastPurchaseId` bestimmen den jüngsten
+Kaufpreis gemäß der bestehenden Datums-/Positionsreihenfolge. Die unveränderten
+Bon-Bezeichnungen bleiben einzeln in der Artikelliste erhalten. Beim Erzeugen des
+Berichts wird ihre Kaufhistorie aus der lokalen Datenbank ergänzt, ohne den
+Zeitpunkt des letzten Katalogabrufs zu verändern. Fehlt bei einem alten Stand
+die zeitliche Zuordnung, zeigt die Karte bei unterschiedlichen Kaufpreisen eine
+Spanne statt eines geratenen letzten Preises. Unterschiedliche Produkt-IDs oder
+Angebotskonditionen werden nicht zusammengeführt.
 Bis 600 px bleibt die Navigation unten am Bildschirmrand. Beim Tabwechsel wird
 die Dokumentposition sofort nach oben gesetzt; Tabellen besitzen eigene
 Scrollbereiche und verbreitern die Seite nicht.

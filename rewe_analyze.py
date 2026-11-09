@@ -1378,8 +1378,17 @@ def generate_report(conn: sqlite3.Connection):
 
     # A failed refresh must not hide the last complete catalogue. The browser
     # evaluates each offer's end date, including in an older published report.
-    from rewe_shop import load_offer_snapshot
+    from rewe_shop import CHANNELS, load_offer_snapshot, purchased_items
     offer_snapshot = load_offer_snapshot(DATA_DIR / "rewe_offer_snapshot.json")
+    if offer_snapshot:
+        # Purchase history is local and may be newer than the saved catalogue.
+        # Dates also let cards choose the last price across different receipt names.
+        for channel, config in CHANNELS.items():
+            purchases = {item["name"]: item for item in purchased_items(
+                conn, config["receiptType"], config["receiptMarketId"])}
+            for row in offer_snapshot["channels"][channel]["items"]:
+                if row["name"] in purchases:
+                    row.update(purchases[row["name"]])
     offer_state_js = Path(__file__).with_name('rewe_offer_state.js').read_text('utf-8')
     offer_snapshot_js = json.dumps(offer_snapshot, ensure_ascii=False).replace('</', '<\\/')
 
@@ -2181,7 +2190,9 @@ function marketCard(row) {{
   const discount = row.status === 'offer'
     ? `<span class="market-badge">−${{marketEsc(row.discount || Math.round((1-row.price/row.regular)*100))}} %${{endDate ? ' bis ' + marketEsc(endDate) : ''}}</span>`
     : historical ? `<span class="market-badge">${{row.status === 'expired' ? 'Abgelaufen am ' + marketEsc(endDate) : 'Gültigkeit nicht bestätigt'}}</span>` : '';
-  const last = row.lastPrice == null ? '' : `<small>Zuletzt bezahlt: ${{marketEuro(row.lastPrice)}} · ${{row.purchases}}× gekauft</small>`;
+  const last = row.lastPriceRange
+    ? `<small>Letzte Kaufpreise: ${{row.lastPriceRange.map(marketEuro).join('–')}} · ${{row.purchases}}× gekauft</small>`
+    : row.lastPrice == null ? '' : `<small>Zuletzt bezahlt: ${{marketEuro(row.lastPrice)}} · ${{row.purchases}}× gekauft</small>`;
   const img = row.image ? `<img src="${{marketEsc(row.image)}}" alt="" loading="lazy">` : '';
   const link = row.shopUrl ? `<a href="${{marketEsc(row.shopUrl)}}" target="_blank" rel="noopener noreferrer">Im Shop öffnen ↗</a>` : '';
   return `<div class="market-card ${{row.status === 'offer' || historical ? row.status : ''}}">${{img}}<div class="market-card-main"><b>${{title}}</b>${{price}}${{discount}}${{last}}${{link}}</div></div>`;
@@ -2190,9 +2201,9 @@ function renderMarketOffers(channel) {{
   if (!MARKET_CHECK[channel]) return;
   const rows = (MARKET_CHECK[channel].items || []).map(row => marketOfferState(row, MARKET_CHECK[channel].checkedAt));
   const scope = channel === 'market' ? 'Abholsortiment' : 'Onlineshop';
-  const offers = rows.filter(row => row.status === 'offer');
-  const historical = rows.filter(row => row.status === 'expired' || row.status === 'unconfirmed');
-  const unavailable = rows.filter(row => row.status === 'unavailable');
+  const offers = groupMarketProducts(rows.filter(row => row.status === 'offer'));
+  const historical = groupMarketProducts(rows.filter(row => row.status === 'expired' || row.status === 'unconfirmed'));
+  const unavailable = groupMarketProducts(rows.filter(row => row.status === 'unavailable'));
   const unmapped = rows.filter(row => row.status === 'unmapped');
   const errors = rows.filter(row => row.status === 'error');
   const pending = rows.filter(row => row.status === 'pending');
@@ -2201,7 +2212,7 @@ function renderMarketOffers(channel) {{
   document.getElementById(channel + '-kpis').innerHTML = `
     <div><strong>${{offers.length}}</strong>Artikel im Angebot</div>
     <div><strong>${{historical.length}}</strong>frühere Angebotstreffer</div>
-    <div><strong>${{rows.filter(row => row.status === 'available' || row.status === 'offer').length}}</strong>bei REWE gelistet</div>
+    <div><strong>${{groupMarketProducts(rows.filter(row => row.status === 'available' || row.status === 'offer')).length}}</strong>bei REWE gelistet</div>
     <div><strong>${{unavailable.length}}</strong>derzeit nicht gelistet</div>
     <div><strong>${{unmapped.length}}</strong>ohne sicheren Treffer</div>
     <div><strong>${{errors.length}}</strong>Prüfung fehlgeschlagen</div>

@@ -276,9 +276,9 @@ def check_items(items: list[dict], known: dict[str, str] | None = None, search_f
 def purchased_items(connection, receipt_type: str = "ebon",
                     receipt_market_id: str | None = None) -> list[dict]:
     rows = connection.execute("""
-        SELECT name, purchases, unit_price AS last_price, min_price
+        SELECT name, purchases, unit_price AS last_price, min_price, last_purchase_date, last_purchase_id
         FROM (
-            SELECT i.name, i.unit_price,
+            SELECT i.name, i.unit_price, r.date AS last_purchase_date, i.id AS last_purchase_id,
                    COUNT(*) OVER (PARTITION BY i.name) AS purchases,
                    MIN(i.unit_price) OVER (PARTITION BY i.name) AS min_price,
                    ROW_NUMBER() OVER (PARTITION BY i.name ORDER BY r.date DESC, i.id DESC) AS row_number
@@ -287,5 +287,6 @@ def purchased_items(connection, receipt_type: str = "ebon",
         ) WHERE row_number = 1
         ORDER BY purchases DESC, name
     """, (receipt_type, receipt_market_id, receipt_market_id)).fetchall()
-    return [{"name": r[0], "purchases": r[1], "lastPrice": r[2], "minPrice": r[3]}
+    return [{"name": r[0], "purchases": r[1], "lastPrice": r[2], "minPrice": r[3],
+             "lastPurchaseDate": r[4], "lastPurchaseId": r[5]}
             for r in rows if not _EXCLUDE.match(r[0])]

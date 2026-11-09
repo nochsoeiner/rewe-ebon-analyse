@@ -16,3 +16,32 @@ function marketOfferState(row, checkedAt, now = new Date()) {
   return Number.isFinite(age) && age >= 0 && age <= 30 * 3600 * 1000
     ? row : {...row, status: 'unconfirmed'};
 }
+
+// Several receipt names can map to the same shop product. Keep the receipt
+// rows intact and combine only cards with the same product and offer terms.
+function groupMarketProducts(rows) {
+  const groups = new Map();
+  for (const row of rows) {
+    const key = row.productId ? JSON.stringify([
+      String(row.productId), row.status, row.price, row.regular, row.validUntil
+    ]) : Symbol();
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  }
+  return Array.from(groups.values(), members => {
+    const dated = members.every(row => /^\d{4}-\d{2}-\d{2}$/.test(row.lastPurchaseDate || '')
+      && Number.isInteger(row.lastPurchaseId));
+    const latest = dated ? members.reduce((a, b) =>
+      b.lastPurchaseDate > a.lastPurchaseDate ||
+      (b.lastPurchaseDate === a.lastPurchaseDate && b.lastPurchaseId > a.lastPurchaseId) ? b : a) : null;
+    const prices = [...new Set(members.map(row => row.lastPrice).filter(Number.isFinite))];
+    const minimums = members.map(row => row.minPrice).filter(Number.isFinite);
+    return {
+      ...(latest || members[0]),
+      purchases: members.reduce((sum, row) => sum + (row.purchases || 0), 0),
+      lastPrice: latest ? latest.lastPrice : prices.length === 1 ? prices[0] : null,
+      lastPriceRange: !latest && prices.length > 1 ? [Math.min(...prices), Math.max(...prices)] : null,
+      minPrice: minimums.length ? Math.min(...minimums) : null,
+    };
+  });
+}

@@ -109,10 +109,13 @@ class ReweShopTest(unittest.TestCase):
                 (7,2,'Brot',2.49),(8,5,'Brot',3.19);
         """)
         self.assertEqual(purchased_items(connection, "ebon", "5775"), [
-            {"name": "Kaffee 500g", "purchases": 2, "lastPrice": 5.99, "minPrice": 5.99},
-            {"name": "Brot", "purchases": 1, "lastPrice": 2.49, "minPrice": 2.49}])
+            {"name": "Kaffee 500g", "purchases": 2, "lastPrice": 5.99, "minPrice": 5.99,
+             "lastPurchaseDate": "2026-09-21", "lastPurchaseId": 2},
+            {"name": "Brot", "purchases": 1, "lastPrice": 2.49, "minPrice": 2.49,
+             "lastPurchaseDate": "2026-09-21", "lastPurchaseId": 7}])
         self.assertEqual(purchased_items(connection, "shop"), [
-            {"name": "Kaffee 500g", "purchases": 2, "lastPrice": 8.99, "minPrice": 8.99}])
+            {"name": "Kaffee 500g", "purchases": 2, "lastPrice": 8.99, "minPrice": 8.99,
+             "lastPurchaseDate": "2026-09-23", "lastPurchaseId": 6}])
 
 
 if __name__ == "__main__":

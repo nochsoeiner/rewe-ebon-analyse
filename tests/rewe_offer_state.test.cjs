@@ -48,3 +48,52 @@ test('regular purchase rows keep their availability status', () => {
   const row = {name: 'Testartikel', status: 'pending'};
   assert.equal(state(row, checkedAt, '2026-10-04T11:00:00Z'), row);
 });
+
+const group = rows => JSON.parse(JSON.stringify(context.groupMarketProducts(rows)));
+const purchasedOffer = {
+  ...offer, productId: '123', title: 'Testprodukt 400 g', price: 2.49, regular: 4.69,
+  purchases: 3, lastPrice: 2.59, minPrice: 2.49,
+  lastPurchaseDate: '2026-10-05', lastPurchaseId: 5,
+};
+
+test('receipt aliases share one card with total purchases and the latest paid price', () => {
+  const older = {...purchasedOffer, name: 'Zweiter Bonname', purchases: 2, lastPrice: 2.39,
+    minPrice: 2.19, lastPurchaseDate: '2025-10-25', lastPurchaseId: 2};
+  for (const rows of [[purchasedOffer, older], [older, purchasedOffer]]) {
+    const before = JSON.stringify(rows);
+    const result = group(rows);
+    assert.equal(result.length, 1);
+    assert.equal(result[0].purchases, 5);
+    assert.equal(result[0].lastPrice, 2.59);
+    assert.equal(result[0].minPrice, 2.19);
+    assert.equal(JSON.stringify(rows), before);
+  }
+});
+
+test('purchases on the same day use the existing receipt-row order', () => {
+  const newer = {...purchasedOffer, lastPurchaseId: 8, lastPrice: 2.79};
+  assert.equal(group([newer, purchasedOffer])[0].lastPrice, 2.79);
+});
+
+test('identical titles with different product IDs stay separate', () => {
+  assert.equal(group([purchasedOffer, {...purchasedOffer, productId: '456'}]).length, 2);
+});
+
+test('missing product IDs never merge unrelated purchases', () => {
+  const row = {...purchasedOffer, productId: null};
+  assert.equal(group([row, row]).length, 2);
+});
+
+test('different offer validity or prices are not merged', () => {
+  assert.equal(group([purchasedOffer, {...purchasedOffer, validUntil: '2026-10-10'}]).length, 2);
+  assert.equal(group([purchasedOffer, {...purchasedOffer, price: 1.99}]).length, 2);
+});
+
+test('legacy snapshots without purchase dates show a price range instead of guessing', () => {
+  const first = {...purchasedOffer, lastPurchaseDate: null};
+  const second = {...first, lastPrice: 2.39};
+  const result = group([first, second]);
+  assert.equal(result.length, 1);
+  assert.equal(result[0].lastPrice, null);
+  assert.deepEqual(result[0].lastPriceRange, [2.39, 2.59]);
+});

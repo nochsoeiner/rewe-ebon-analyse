@@ -13,6 +13,9 @@ Abholsortiment abgeglichen, Online-Rechnungen mit dem Lieferservice.
 Jede Angebotskarte zeigt Produktbild, Angebotspreis und bisherigen regulären
 Preis, Rabatt, Gültigkeitsdatum sowie den zuletzt bezahlten Preis und die eigene
 Kaufanzahl. Über **Im Shop öffnen** geht es zur zugeordneten REWE-Produktvariante.
+Unterschiedliche Bon-Bezeichnungen für dieselbe Produkt-ID werden bei gleichen
+Angebotskonditionen in einer Karte zusammengefasst. Die Kaufanzahl wird addiert;
+der zuletzt bezahlte Preis stammt aus dem jüngsten zugehörigen Kauf.
 
 <img src="docs/images/angebote-mobil.jpg" alt="Mobile Angebotsansicht mit Produktbildern, Angebotspreisen, Rabatten, Gültigkeitsdaten und persönlichem Preisvergleich" width="430">
 
