@@ -16,16 +16,12 @@ Kaufanzahl. Über **Im Shop öffnen** geht es zur zugeordneten REWE-Produktvaria
 
 <img src="docs/images/angebote-mobil.jpg" alt="Mobile Angebotsansicht mit Produktbildern, Angebotspreisen, Rabatten, Gültigkeitsdaten und persönlichem Preisvergleich" width="430">
 
-*Screenshot vom 9. November 2026. Die abgebildeten Preise und Angebote gelten für
-den damaligen Zeitraum und sind keine aktuellen Preiszusagen.*
-
 ### Sonntags für die kommende Woche
 
-Im eingerichteten Betrieb ruft eine separate **Codex-Automation jeden Sonntag um
-18:00 Uhr (Europe/Berlin)** die Angebotslisten für Markt und Lieferservice ab.
-Sie prüft die Gültigkeitsdaten für die kommende Woche ab Montag. Liefert REWE
-noch keine passenden Wochenangebote, wird die Aktualisierung als unvollständig
-gemeldet.
+Ein eigener **macOS-Hintergrundjob ruft jeden Sonntag um 18:00 Uhr** die
+Angebotslisten für Markt und Lieferservice für die kommende Woche ab. Der Abruf
+läuft direkt mit Python, auch wenn die App und der Browser geschlossen sind.
+Die Gültigkeitsdaten stehen auf den jeweiligen Angebotskarten.
 
 Der automatische Abruf lädt öffentliche rabattierte Kataloge und gleicht die
 gekauften Artikel **lokal** ab. Dabei werden keine persönlichen Artikelnamen an
@@ -39,8 +35,19 @@ Verfügbarkeit im Marktregal. Die zusätzliche manuelle Einzelprüfung startet n
 nach einem Klick in der lokalen App und sendet die betreffenden Artikelnamen an
 REWE.
 
-Der Sonntagszeitplan ist eine separat eingerichtete Automation und wird nicht
-von `install.sh` angelegt. Der Angebotsabruf lässt sich auch manuell starten:
+`./install.sh` richtet den Angebotsjob zusammen mit den bestehenden REWE-Jobs
+ein. Nur den Sonntagsabruf installieren oder aktualisieren:
+
+```bash
+python3 scripts/install-offer-job.py
+```
+
+Der Job `com.marc.rewe-offers` verwendet die lokale Mac-Zeit (im eingerichteten
+Betrieb Europe/Berlin). Der Mac muss eingeschaltet und der Benutzer angemeldet
+sein. Protokolle liegen unter `~/Library/Logs/rewe-offers.log` und
+`~/Library/Logs/rewe-offers-error.log`.
+
+Einmaliger manueller Abruf:
 
 ```bash
 python3 rewe_offer_refresh.py

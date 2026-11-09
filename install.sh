@@ -4,6 +4,7 @@
 #   Bericht und Daten liefert der gemeinsame Server Haushalt 4173 (/details/rewe/, /api/v1/rewe)
 #   com.marc.rewe-web-update   stündlich: Online-Änderungen holen, Bericht erzeugen, veröffentlichen
 #   com.marc.rewe-web-publish  bei neuem Bericht: Online-Fassung aktualisieren
+#   com.marc.rewe-offers       sonntags 18:00: Angebotskataloge abrufen
 # Neue eBons holt der gemeinsame Mail-Export (Regeln rewe-ebon/rewe-shop) und stößt rewe-web-update an.
 # Mehrfach ausführbar – schreibt die LaunchAgents und lädt sie neu, Daten bleiben erhalten.
 set -euo pipefail
@@ -71,4 +72,6 @@ sleep 1
 for l in "${LABELS[@]}"; do plutil -lint -s "$AGENTS/$l.plist"; done
 for l in "${LABELS[@]}"; do launchctl bootstrap "$DOMAIN" "$AGENTS/$l.plist"; done
 
-echo "✓ REWE: Aktualisierung (stündlich) und Veröffentlichung geladen"
+"$PY" "$SRC/scripts/install-offer-job.py"
+
+echo "✓ REWE: Angebotsabruf (sonntags), Aktualisierung (stündlich) und Veröffentlichung geladen"

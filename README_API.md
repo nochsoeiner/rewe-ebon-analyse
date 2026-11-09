@@ -43,12 +43,28 @@ Die Marktpreise und Verfügbarkeitsangaben stammen aus dem **Abholsortiment** de
 
 ## Wöchentlicher Angebotsabruf und mobile Darstellung
 
-Im eingerichteten Betrieb startet die separate Codex-Automation den Abruf jeden
-Sonntag um **18:00 Uhr (Europe/Berlin)** für die kommende Woche ab Montag. Sie
-prüft zusätzlich die Angebotsgültigkeit; ein neuer `checkedAt`-Zeitpunkt allein
-belegt keine Angebote für die Zielwoche. Der Zeitplan liegt außerhalb des
-Repositorys und wird nicht von `install.sh` angelegt. Die stündliche
-Berichtserstellung und die Veröffentlichung sind davon unabhängige Abläufe.
+Der macOS-LaunchAgent `com.marc.rewe-offers` startet `rewe_offer_refresh.py`
+direkt mit Python, sonntags um **18:00 Uhr lokaler Mac-Zeit** (im eingerichteten
+Betrieb Europe/Berlin). Er benötigt weder eine laufende App noch einen Browser.
+`install.sh` richtet ihn mit ein; `python3 scripts/install-offer-job.py` installiert
+nur diesen Job, ohne die bestehenden Veröffentlichungsjobs neu zu laden.
+Die Konfiguration wird über `plistlib` mit absoluten Code-, Python- und Datenpfaden
+erzeugt. Die systemeigene Kalenderplanung übernimmt den wöchentlichen Start.
+Der Mac muss eingeschaltet und der Benutzer angemeldet sein.
+
+Status und Logs:
+
+```bash
+launchctl print "gui/$(id -u)/com.marc.rewe-offers"
+tail -n 30 ~/Library/Logs/rewe-offers.log
+tail -n 30 ~/Library/Logs/rewe-offers-error.log
+```
+
+Die gemeinsame Dienstüberwachung prüft, ob der LaunchAgent geladen ist, und lädt
+einen fehlenden Job nach. Die stündliche Berichtserstellung und die
+Veröffentlichung sind eigene Abläufe; der Angebotsjob erzeugt den Bericht erst
+nach dem Katalogabruf neu. Gültigkeitsdaten und historische Treffer werden wie
+oben beschrieben ausgewertet.
 
 Der Bericht zeigt Angebote mit Produktbild, aktuellem und regulärem Preis,
 Rabatt, Gültigkeit, letztem eigenen Kaufpreis und Kaufanzahl. Eine mobile
