@@ -17,7 +17,7 @@ Unterschiedliche Bon-Bezeichnungen für dieselbe Produkt-ID werden bei gleichen
 Angebotskonditionen in einer Karte zusammengefasst. Die Kaufanzahl wird addiert;
 der zuletzt bezahlte Preis stammt aus dem jüngsten zugehörigen Kauf.
 
-<img src="docs/images/angebote-mobil.jpg" alt="Mobile Angebotsansicht mit Produktbildern, Angebotspreisen, Rabatten, Gültigkeitsdaten und persönlichem Preisvergleich" width="430">
+<img src="docs/images/angebote-mobil-gruppiert.jpg" alt="Mobile Angebotsansicht mit 16 Angeboten und zusammengefassten Käufen je Produkt" width="430">
 
 ### Sonntags für die kommende Woche
 
