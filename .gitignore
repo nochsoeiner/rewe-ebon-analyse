@@ -7,6 +7,9 @@ rewe_ebons_backup_*.db
 rewe_report.html
 rewe_offer_snapshot.json
 rewe_offer_refresh.lock
+rewe_offer_catalogue.json
+rewe_offer_progress.json
+rewe_product_map.json
 rewe_direct.db
 rewe_direct_report.html
 rewe_direct.py

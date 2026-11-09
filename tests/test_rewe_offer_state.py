@@ -67,12 +67,16 @@ class ReweOfferStateTest(unittest.TestCase):
         before = hashlib.sha256(self.path.read_bytes()).hexdigest()
         database = Path(self.temporary.name) / "rewe.db"
         sqlite3.connect(database).close()
+        directory = Path(self.temporary.name)
         with patch.object(rewe_offer_refresh, "SNAPSHOT_PATH", self.path), \
+                patch.object(rewe_offer_refresh, "CATALOGUE_PATH", directory / "catalogue.json"), \
+                patch.object(rewe_offer_refresh, "PROGRESS_PATH", directory / "progress.json"), \
+                patch.object(rewe_offer_refresh, "PRODUCT_MAP_PATH", directory / "map.json"), \
                 patch.object(rewe_analyze, "DB_PATH", database), \
-                patch("rewe_offer_refresh.rewe_shop.offer_snapshot", side_effect=OSError("catalogue failed")), \
+                patch("rewe_offer_refresh.rewe_shop.discounted_products", side_effect=OSError("catalogue failed")), \
                 patch.object(rewe_analyze, "generate_report") as report:
             with self.assertRaises(OSError):
-                rewe_offer_refresh.refresh()
+                rewe_offer_refresh.run(log=lambda _message: None)
         self.assertEqual(hashlib.sha256(self.path.read_bytes()).hexdigest(), before)
         report.assert_not_called()
 

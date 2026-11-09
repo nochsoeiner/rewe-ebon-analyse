@@ -2207,6 +2207,7 @@ function renderMarketOffers(channel) {{
   const unmapped = rows.filter(row => row.status === 'unmapped');
   const errors = rows.filter(row => row.status === 'error');
   const pending = rows.filter(row => row.status === 'pending');
+  const nooffer = rows.filter(row => row.status === 'nooffer');
   document.getElementById(channel + '-offer-count').textContent = `(${{offers.length}})`;
   document.getElementById(channel + '-unavailable-count').textContent = `(${{unavailable.length}})`;
   document.getElementById(channel + '-kpis').innerHTML = `
@@ -2214,6 +2215,7 @@ function renderMarketOffers(channel) {{
     <div><strong>${{historical.length}}</strong>frühere Angebotstreffer</div>
     <div><strong>${{groupMarketProducts(rows.filter(row => row.status === 'available' || row.status === 'offer')).length}}</strong>bei REWE gelistet</div>
     <div><strong>${{unavailable.length}}</strong>derzeit nicht gelistet</div>
+    <div><strong>${{nooffer.length}}</strong>zugeordnet, kein Angebot</div>
     <div><strong>${{unmapped.length}}</strong>ohne sicheren Treffer</div>
     <div><strong>${{errors.length}}</strong>Prüfung fehlgeschlagen</div>
     <div><strong>${{pending.length}}</strong>noch nicht geprüft</div>`;
@@ -2226,7 +2228,7 @@ function renderMarketOffers(channel) {{
   document.getElementById(channel + '-unavailable').innerHTML = unavailable.map(marketCard).join('') || `<p>Kein zuvor zugeordneter Artikel ist im ${{scope}} verschwunden.</p>`;
   const query = document.getElementById(channel + '-filter').value.toLocaleLowerCase('de-DE');
   document.getElementById(channel + '-all').innerHTML = rows.filter(row => row.name.toLocaleLowerCase('de-DE').includes(query)).map(row =>
-    `<div class="market-list-row"><span>${{marketEsc(row.name)}} <small>${{row.purchases}}× gekauft</small></span><span>${{row.status === 'offer' ? '🏷 Angebot' : row.status === 'expired' ? 'Früheres Angebot · abgelaufen' : row.status === 'unconfirmed' ? 'Früheres Angebot · Gültigkeit unbestätigt' : row.status === 'available' ? marketEuro(row.price) : row.status === 'unavailable' ? `Im ${{scope}} nicht gelistet` : row.status === 'error' ? 'Prüfung fehlgeschlagen' : row.status === 'pending' ? 'Noch nicht geprüft' : 'Nicht sicher zugeordnet'}}</span></div>`
+    `<div class="market-list-row"><span>${{marketEsc(row.name)}} <small>${{row.purchases}}× gekauft</small></span><span>${{row.status === 'offer' ? '🏷 Angebot' : row.status === 'expired' ? 'Früheres Angebot · abgelaufen' : row.status === 'unconfirmed' ? 'Früheres Angebot · Gültigkeit unbestätigt' : row.status === 'available' ? marketEuro(row.price) : row.status === 'unavailable' ? `Im ${{scope}} nicht gelistet` : row.status === 'error' ? 'Prüfung fehlgeschlagen' : row.status === 'nooffer' ? 'Kein Angebot' : row.status === 'pending' ? 'Noch nicht geprüft' : 'Nicht sicher zugeordnet'}}</span></div>`
   ).join('');
 }}
 async function checkChannelOffers(channel) {{

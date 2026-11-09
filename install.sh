@@ -4,7 +4,7 @@
 #   Bericht und Daten liefert der gemeinsame Server Haushalt 4173 (/details/rewe/, /api/v1/rewe)
 #   com.marc.rewe-web-update   stündlich: Online-Änderungen holen, Bericht erzeugen, veröffentlichen
 #   com.marc.rewe-web-publish  bei neuem Bericht: Online-Fassung aktualisieren
-#   com.marc.rewe-offers       sonntags 18:00: Angebotskataloge abrufen
+#   com.marc.rewe-offers       sonntags 18:00 + nachts 1:30/3:00/4:30: Angebote + Produkt-IDs
 # Neue eBons holt der gemeinsame Mail-Export (Regeln rewe-ebon/rewe-shop) und stößt rewe-web-update an.
 # Mehrfach ausführbar – schreibt die LaunchAgents und lädt sie neu, Daten bleiben erhalten.
 set -euo pipefail

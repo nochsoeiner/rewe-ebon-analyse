@@ -72,7 +72,17 @@ class ShopThrottled(RuntimeError):
 
 _request_lock = threading.Lock()
 _next_request_at = 0.0
+# Interactive defaults. The unattended night job slows down via configure_pacing().
 _REQUEST_INTERVAL = 0.8
+_RETRY_DELAYS = (5, 15)
+_MAX_RETRY_AFTER = 30
+MAX_OFFER_PAGES = 200
+
+
+def configure_pacing(interval: float, retry_delays: tuple[int, int], max_retry_after: int) -> None:
+    """Use longer gaps for background runs, where finishing later is acceptable."""
+    global _REQUEST_INTERVAL, _RETRY_DELAYS, _MAX_RETRY_AFTER
+    _REQUEST_INTERVAL, _RETRY_DELAYS, _MAX_RETRY_AFTER = interval, retry_delays, max_retry_after
 
 
 def _pace_request() -> None:
@@ -85,9 +95,17 @@ def _pace_request() -> None:
         _next_request_at = time.monotonic() + _REQUEST_INTERVAL
 
 
+_UMLAUTS = str.maketrans({"ä": "ae", "ö": "oe", "ü": "ue", "ß": "ss"})
+_UNIT = r"(?:kg|g|mg|l|ml|cl|stk|st)"
+
+
 def normalize(value: str) -> str:
-    value = value.casefold().replace("ß", "ss")
+    # eBons spell umlauts as AE/OE/UE ("MUELLER"), the shop uses "Müller".
+    value = value.casefold().translate(_UMLAUTS)
     value = "".join(c for c in unicodedata.normalize("NFKD", value) if not unicodedata.combining(c))
+    # "1,0L", "1.0 l" and "1l" describe the same package size.
+    value = re.sub(rf"(\d)[,.]0+\s*(?={_UNIT}\b)", r"\1", value)
+    value = re.sub(rf"(\d)\s+(?={_UNIT}\b)", r"\1", value)
     return " ".join(re.findall(r"[a-z0-9]+", value))
 
 
@@ -116,13 +134,13 @@ def _exact_abbreviation(needle: str, title: str) -> bool:
     )
 
 
-def choose_product(name: str, products: list[dict]) -> dict | None:
-    ranked = sorted(((_score(name, p.get("productName", "")), p) for p in products),
+def choose_product(name: str, products: list[dict], title_key: str = "productName") -> dict | None:
+    ranked = sorted(((_score(name, p.get(title_key, "")), p) for p in products),
                     key=lambda pair: pair[0], reverse=True)
     if not ranked or ranked[0][0] < 0.84:
         return None
     if len(ranked) > 1 and ranked[0][0] - ranked[1][0] < 0.08:
-        exact = [p for _, p in ranked if _exact_abbreviation(name, p.get("productName", ""))]
+        exact = [p for _, p in ranked if _exact_abbreviation(name, p.get(title_key, ""))]
         if len(exact) != 1 or exact[0] is not ranked[0][1]:
             return None
     return ranked[0][1]
@@ -171,7 +189,8 @@ def _catalogue_page(parameters: dict, channel: str) -> dict:
             if attempt == 2:
                 raise ShopThrottled(429) from None
             retry_after = error.headers.get("Retry-After") if error.headers else None
-            delay = min(30, max(1, int(retry_after))) if retry_after and retry_after.isdecimal() else (5, 15)[attempt]
+            delay = (min(_MAX_RETRY_AFTER, max(1, int(retry_after)))
+                     if retry_after and retry_after.isdecimal() else _RETRY_DELAYS[attempt])
             time.sleep(delay)
     if len(data) > 2_000_000:
         raise ValueError("REWE-Antwort zu groß")
@@ -188,40 +207,123 @@ def search(query: str, channel: str = "market") -> list[dict]:
     return _catalogue_page({"search": query, "page": 1}, channel)["_embedded"]["products"]
 
 
-def discounted_products(channel: str) -> list[dict]:
-    """Read the shop's offer facet in pages, without sending purchase history."""
-    products = []
-    page = 1
-    total_pages = 1
+def discounted_products(channel: str, progress: dict | None = None, on_page=None) -> list[dict]:
+    """Read the shop's offer facet in pages, without sending purchase history.
+
+    ``progress`` ({"page", "offers"}) resumes an interrupted run. ``on_page`` is
+    called after every page so a throttled run can continue later where it
+    stopped instead of starting over. The result holds ``_product_data`` rows.
+    """
+    progress = progress or {}
+    offers = list(progress.get("offers") or [])
+    page = progress.get("page") or 1
+    total_pages = progress.get("totalPages") or page
     while page <= total_pages:
         payload = _catalogue_page({"attribute": "discounted", "page": page}, channel)
         pagination = payload.get("pagination", {})
         if (pagination.get("page") != page or
                 not isinstance(pagination.get("totalPages"), int) or
-                not 1 <= pagination["totalPages"] <= 50 or
+                not 1 <= pagination["totalPages"] <= MAX_OFFER_PAGES or
                 "discounted" not in payload.get("search", {}).get("selectedFacets", {}).get("attribute", [])):
             raise ValueError("REWE-Angebotsseiten sind unvollständig")
         total_pages = pagination["totalPages"]
-        products.extend(payload["_embedded"]["products"])
+        offers.extend(row for row in map(_product_data, payload["_embedded"]["products"])
+                      if row["productId"] and row["status"] == "offer")
         page += 1
-    unique = {str(product.get("id")): product for product in products if product.get("id")}
-    return [product for product in unique.values() if _product_data(product)["status"] == "offer"]
+        if on_page is not None:
+            on_page({"page": page, "totalPages": total_pages, "offers": offers})
+    return list({row["productId"]: row for row in offers}.values())
 
 
-def offer_snapshot(connection) -> dict:
-    """Match both purchased catalogues locally against current shop discounts."""
+def offer_snapshot(connection, catalogue: dict, product_map: dict | None = None) -> dict:
+    """Match purchases locally against a complete offer catalogue.
+
+    A product ID found earlier by a name search is the reliable link: the offer
+    is then recognised regardless of how the eBon abbreviates the name. Names
+    without an ID fall back to the conservative title comparison.
+    """
+    product_map = product_map or {}
     channels = {}
     for channel, config in CHANNELS.items():
         purchases = purchased_items(connection, config["receiptType"], config["receiptMarketId"])
-        offers = discounted_products(channel)
+        offers = catalogue["channels"][channel]
+        by_id = {row["productId"]: row for row in offers}
+        known = product_map.get(channel, {})
         rows = []
         for item in purchases:
-            match = choose_product(item["name"], offers)
-            rows.append({**item, **_product_data(match), "status": "offer"} if match is not None
-                        else {**item, "status": "pending"})
+            entry = known.get(item["name"]) or {}
+            product_id = entry.get("productId")
+            if product_id:
+                offer = by_id.get(product_id)
+                rows.append({**item, **offer, "status": "offer", "matchedBy": "id"} if offer else
+                            {**item, "productId": product_id, "title": entry.get("title", ""),
+                             "status": "nooffer"})
+                continue
+            match = choose_product(item["name"], offers, "title")
+            if match is not None:
+                rows.append({**item, **match, "status": "offer", "matchedBy": "name"})
+            else:
+                rows.append({**item, "status": "unmapped" if entry.get("checkedAt") else "pending"})
         channels[channel] = {"items": rows, "catalogueOffers": len(offers)}
-    return {"checkedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "channels": channels}
+    return {"checkedAt": catalogue["checkedAt"], "channels": channels}
+
+
+MAPPING_RECHECK_DAYS = 30
+
+
+def mapping_candidates(connection, product_map: dict, now: datetime) -> list[tuple[str, dict]]:
+    """Names still lacking a product ID, most frequently bought first, channels alternating."""
+    queues = []
+    for channel, config in CHANNELS.items():
+        known = product_map.get(channel, {})
+        queue = []
+        for item in purchased_items(connection, config["receiptType"], config["receiptMarketId"]):
+            entry = known.get(item["name"])
+            if entry and entry.get("productId"):
+                continue
+            if entry and entry.get("checkedAt"):
+                try:
+                    age = now - datetime.fromisoformat(entry["checkedAt"])
+                except (TypeError, ValueError):
+                    age = None
+                if age is not None and age.days < MAPPING_RECHECK_DAYS:
+                    continue
+            queue.append((channel, item))
+        queues.append(queue)
+    ordered = []
+    for position in range(max(map(len, queues), default=0)):
+        ordered.extend(queue[position] for queue in queues if position < len(queue))
+    return ordered
+
+
+def map_products(candidates: list[tuple[str, dict]], product_map: dict, limit: int,
+                 now: datetime, search_fn=None, on_item=None) -> dict:
+    """Search single names to learn their product IDs; stop early when REWE throttles."""
+    search_fn = search_fn or search
+    looked_up = mapped = 0
+    consecutive_errors = 0
+    paused = False
+    for channel, item in candidates[:limit]:
+        try:
+            row = check_one(item, None, search_fn, channel)
+        except ShopThrottled:
+            paused = True
+            break
+        looked_up += 1
+        if row["status"] == "error":
+            consecutive_errors += 1
+            if consecutive_errors >= 3:
+                paused = True
+                break
+            continue
+        consecutive_errors = 0
+        entry = {"checkedAt": now.isoformat(timespec="seconds"),
+                 "productId": row.get("productId") or None, "title": row.get("title") or None}
+        product_map.setdefault(channel, {})[item["name"]] = entry
+        mapped += bool(entry["productId"])
+        if on_item is not None:
+            on_item(product_map)
+    return {"lookedUp": looked_up, "mapped": mapped, "paused": paused}
 
 
 def check_one(item: dict, known_id: str | None = None, search_fn=search, channel: str = "market") -> dict:

@@ -14,7 +14,7 @@ spec.loader.exec_module(job)
 
 
 class OfferJobTest(unittest.TestCase):
-    def test_installed_schedule_runs_only_sunday_and_preserves_other_jobs(self):
+    def test_installed_schedule_runs_sunday_and_at_night_and_preserves_other_jobs(self):
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)
             agents = home / "Library/LaunchAgents"
@@ -27,12 +27,13 @@ class OfferJobTest(unittest.TestCase):
                 path = job.install(code, data, home, "/test/python3", load=False)
             run.assert_not_called()
             installed = plistlib.loads(path.read_bytes())
-            self.assertEqual(installed["StartCalendarInterval"],
-                             {"Weekday": 0, "Hour": 18, "Minute": 0})
+            self.assertEqual(installed["StartCalendarInterval"], [
+                {"Weekday": 0, "Hour": 18, "Minute": 0},
+                {"Hour": 1, "Minute": 30}, {"Hour": 3, "Minute": 0}, {"Hour": 4, "Minute": 30}])
             self.assertNotIn("StartInterval", installed)
             self.assertNotIn("RunAtLoad", installed)
             self.assertEqual(installed["ProgramArguments"],
-                             ["/test/python3", str(code / "rewe_offer_refresh.py")])
+                             ["/test/python3", str(code / "rewe_offer_refresh.py"), "--scheduled"])
             self.assertEqual(installed["EnvironmentVariables"]["REWE_DATA_DIR"], str(data))
             self.assertEqual(existing.read_bytes(), b"existing job")
 

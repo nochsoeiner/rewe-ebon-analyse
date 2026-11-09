@@ -26,11 +26,22 @@ Angebotslisten für Markt und Lieferservice für die kommende Woche ab. Der Abru
 läuft direkt mit Python, auch wenn die App und der Browser geschlossen sind.
 Die Gültigkeitsdaten stehen auf den jeweiligen Angebotskarten.
 
-Der automatische Abruf lädt öffentliche rabattierte Kataloge und gleicht die
-gekauften Artikel **lokal** ab. Dabei werden keine persönlichen Artikelnamen an
-REWE übertragen. Nach einem vollständigen Abruf wird der Angebotsstand atomar
-gespeichert und der Bericht neu erzeugt. Die bestehende Veröffentlichung zeigt
-ihn auch in der passwortgeschützten Online-Fassung.
+Der Angebotskatalog selbst enthält keine persönlichen Artikelnamen; er wird
+seitenweise geladen und **lokal** mit den Käufen abgeglichen. Bremst REWE den
+Abruf (HTTP 429/403), bleibt der Fortschritt gespeichert und die **Nachtläufe um
+1:30, 3:00 und 4:30 Uhr** setzen ab der unterbrochenen Seite fort. Erst nach
+vollständigem Abruf beider Kanäle wird der Angebotsstand atomar gespeichert und
+der Bericht neu erzeugt. Die bestehende Veröffentlichung zeigt ihn auch in der
+passwortgeschützten Online-Fassung.
+
+Damit Angebote auch bei stark abgekürzten Bon-Namen sicher erkannt werden, sucht
+jeder Lauf zusätzlich bis zu 60 gekaufte Namen einzeln in der REWE-Produktsuche
+und merkt sich die gefundene **Produkt-ID** (`rewe_product_map.json`). Diese
+Suche überträgt – wie die manuelle Prüfung – die betreffenden Artikelnamen an
+REWE, langsam (ein Abruf alle 3 Sekunden) und in Portionen über die Nacht
+verteilt. Ein Angebot eines zugeordneten Artikels wird danach unabhängig von der
+Schreibweise auf dem Bon erkannt. Namen ohne sicheren Treffer werden nach 30
+Tagen erneut gesucht.
 
 Abgelaufene Treffer bleiben unter **Zuletzt erfasste Angebote** mit ihrem damaligen
 Preis sichtbar. Ein fehlender Angebotstreffer ist keine Aussage über die
@@ -39,7 +50,7 @@ nach einem Klick in der lokalen App und sendet die betreffenden Artikelnamen an
 REWE.
 
 `./install.sh` richtet den Angebotsjob zusammen mit den bestehenden REWE-Jobs
-ein. Nur den Sonntagsabruf installieren oder aktualisieren:
+ein. Nur den Angebotsjob (Sonntag + Nachtläufe) installieren oder aktualisieren:
 
 ```bash
 python3 scripts/install-offer-job.py
@@ -50,11 +61,21 @@ Betrieb Europe/Berlin). Der Mac muss eingeschaltet und der Benutzer angemeldet
 sein. Protokolle liegen unter `~/Library/Logs/rewe-offers.log` und
 `~/Library/Logs/rewe-offers-error.log`.
 
-Einmaliger manueller Abruf:
+Einmaliger manueller Abruf (Katalog sofort, plus bis zu 60 Namenssuchen):
 
 ```bash
 python3 rewe_offer_refresh.py
 ```
+
+Nur den Katalog abrufen, ohne Namen an REWE zu senden:
+
+```bash
+python3 rewe_offer_refresh.py --map-limit 0
+```
+
+Das Log zeigt je Kanal, wie viele Artikel per Produkt-ID bzw. per Namensvergleich
+als Angebot erkannt wurden und wie viele noch nicht gesucht oder nicht sicher
+zugeordnet sind.
 
 Details zu Kanälen, Zuordnung, Gültigkeit und Fehlerbehandlung:
 [README_API.md](README_API.md).
@@ -156,11 +177,14 @@ beziehen sich auf diesen Datenordner.
 ├── rewe_report.html              ← Bericht (wird auto-erstellt)
 ├── groups.json                   ← Artikel-Gruppen (wird im Browser gespeichert)
 ├── categories_override.json      ← Kategorie-Overrides (wird im Browser gespeichert)
-└── rewe_offer_snapshot.json      ← letzter vollständiger Angebotsstand
+├── rewe_offer_snapshot.json      ← letzter vollständiger Angebotsstand
+├── rewe_offer_catalogue.json     ← zuletzt vollständig geladene Angebotskataloge
+├── rewe_offer_progress.json      ← Zwischenstand eines unterbrochenen Abrufs
+└── rewe_product_map.json         ← gelernte Zuordnung Bon-Name → REWE-Produkt-ID
 ```
 
 > **Hinweis:** `import/`, `pdfs/`, `rewe_ebons.db`, `rewe_report.html`,
-> `groups.json`, `categories_override.json` und `rewe_offer_snapshot.json` enthalten persönliche Daten
+> `groups.json`, `categories_override.json`, `rewe_offer_*.json` und `rewe_product_map.json` enthalten persönliche Daten
 > und sind in `.gitignore` ausgeschlossen.
 
 ## Datenmodell
